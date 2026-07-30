@@ -186,7 +186,7 @@ class Learner:
             if len(parts) >= 2:
                 ckpt_day = parts[0]
                 ckpt_path = parts[1]
-                print("load model checkpoint_path=%s, checkpoint_day=%s",ckpt_path, ckpt_day)
+                print("load model checkpoint_path=%s, checkpoint_day=%s" % (ckpt_path, ckpt_day))
                 return ckpt_path
             else:
                 print("model.done last line format error")
