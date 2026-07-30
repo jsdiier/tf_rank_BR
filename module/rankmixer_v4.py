@@ -137,7 +137,11 @@ class RankMixer(tf.keras.layers.Layer):
             RankMixerBlock(t, token_dim, num_heads, num_experts, hidden_ratio, l1_coeff, self.training)
             for _ in range(num_blocks)
         ]
-        self.token_proj=tf.keras.layers.Dense(token_dim,activation=None,name="token_proj")
+        # 每个特征组维度不同，不能共用一个 Dense，按 token 位置各自单独投影到 token_dim
+        self.token_proj_layers = [
+            tf.keras.layers.Dense(token_dim, activation=None, name="token_proj_{}".format(i))
+            for i in range(t)
+        ]
         # 添加参数日志输出
         logger.info("RankMixer initialized with parameters: t={}, token_dim={}, "
                     "num_blocks={}, num_heads={}, num_experts={}, "
@@ -146,20 +150,15 @@ class RankMixer(tf.keras.layers.Layer):
             hidden_ratio, l1_coeff, training))
 
 
-    def call(self, x): #【B，D】
-        # logger.info("RankMixer call method executed")
-        # 划分token,映射
-        batch_size = tf.shape(x)[0]
-        total_dim = x.shape[-1]
-        assert total_dim % self.t == 0
-        per_token_raw_dim = total_dim // self.t
-        # [B, T, total_dim/T]
-        tokens_raw = tf.reshape(
-            x,
-            [batch_size, self.t, per_token_raw_dim]
-        )
-        x = self.token_proj(tokens_raw)
-
+    def call(self, group_tensors): # group_tensors: t 个 [B, group_dim_i] 张量的列表，每个对应一个完整特征组
+        assert len(group_tensors) == self.t, \
+            "RankMixer expects {} feature-group tensors, got {}".format(self.t, len(group_tensors))
+        # 每个特征组各自投影到 token_dim，再拼成 [B, T, token_dim]，保证每个 token 对应一个完整语义单元
+        tokens = [
+            self.token_proj_layers[i](group_tensors[i])
+            for i in range(self.t)
+        ]
+        x = tf.stack(tokens, axis=1)  # [B, T, token_dim]
 
         for block in self.blocks:
             x = block(x, training=self.training)

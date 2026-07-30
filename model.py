@@ -102,7 +102,7 @@ class Model(tf.keras.Model):
         # self.bn = tf.keras.layers.BatchNormalization(momentum=0.99,epsilon=1e-3,center=True,scale=False)
 
         # 初始化底层主网络
-        self.rankmixer = RankMixer(t=16, token_dim=768, num_heads=16, num_experts=16, hidden_ratio=2,
+        self.rankmixer = RankMixer(t=9, token_dim=768, num_heads=16, num_experts=16, hidden_ratio=2,
                                    training=self.training)
         # 初始化序列网络
         self.seq_click_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_click_seq')
@@ -567,13 +567,10 @@ class Model(tf.keras.Model):
             self.query_seq_ln, self.query_seq_proj, self.query_seq_combine)
         seq_outputs.append(query_search_long_seq_out)
 
-        deep = tf.concat([emb_user, emb_shop, emb_interact] + seq_outputs, axis=-1)
-
-        # 余数补dims
-        remain_dims = deep.shape[-1] % (self.rankmixer.t)
-        additional_dims = tf.zeros([tf.shape(deep)[0], self.rankmixer.t - remain_dims])
-        deep_input = tf.concat([deep, additional_dims], axis=1)
-        rankmixer_output = self.rankmixer(deep_input)
+        # 按特征组构造 token：emb_user/emb_shop/emb_interact + 6路序列输出，每组各自投影为一个 token，
+        # 不再对拼接后的扁平向量做机械等分（避免序列特征等高信号特征被切碎、和无关特征混进同一个 token）
+        rankmixer_groups = [emb_user, emb_shop, emb_interact] + seq_outputs
+        rankmixer_output = self.rankmixer(rankmixer_groups)
 
         concat = tf.concat([lr, fm, rankmixer_output], axis=1)
 
