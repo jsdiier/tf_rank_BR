@@ -81,7 +81,7 @@ if [ $? -eq 0 ]; then
             echo "train_end_day=$eday" >> "$CONF_FILE"
         fi
     fi
-    bash put_serving.sh
+    # bash put_serving.sh
 else
      echo "train failed"
 fi
