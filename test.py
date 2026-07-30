@@ -135,18 +135,18 @@ class Learner:
         print(datetime.datetime.now(), "res_buy:%04f, res_cat:%04f, res_click:%04f, res_ext:%04f" % (sum_pred_buy / len(res_buy), sum_pred_cat / len(res_cat), sum_pred_click / len(res_click), sum_pred_ext  / len(res_ext)))
         print(datetime.datetime.now(), "low score rate:%f" % (low_score_num / len(res_buy)))
 
-        auc_score, group_auc, u_avg_auc, o_auc_score, o_group_auc, o_u_avg_auc = ut.multi_auc(res_buy)
+        auc_score, group_auc, u_avg_auc, o_auc_score, o_group_auc, o_u_avg_auc, _, _ = ut.multi_auc(res_buy)
         print(model_path, "test_buy auc:%f gauc:%f uauc:%f size:%d loss:%f, pos: %d" % (
             auc_score, group_auc, u_avg_auc, len(res_buy), loss_buy_sum / len(res_buy), pos_buy))
         print(model_path, "online_buy auc:%f gauc:%f uauc:%f " % (o_auc_score, o_group_auc, o_u_avg_auc))
 
-        auc_score_cat, group_auc_cat, u_avg_auc_cat, o_auc_score_cat, o_group_auc_cat, o_u_avg_auc_cat = ut.multi_auc(
+        auc_score_cat, group_auc_cat, u_avg_auc_cat, o_auc_score_cat, o_group_auc_cat, o_u_avg_auc_cat, _, _ = ut.multi_auc(
             res_cat)
         print(model_path, "test_cat auc:%f gauc:%f uauc:%f size:%d loss:%f, pos: %d" % (
             auc_score_cat, group_auc_cat, u_avg_auc_cat, len(res_cat), loss_cat_sum / len(res_cat), pos_cat))
         print(model_path, "online_cat auc:%f gauc:%f uauc:%f " % (o_auc_score_cat, o_group_auc_cat, o_u_avg_auc_cat))
 
-        auc_score_click, group_auc_click, u_avg_auc_click, o_auc_score_click, o_group_auc_click, o_u_avg_auc_click = ut.multi_auc(
+        auc_score_click, group_auc_click, u_avg_auc_click, o_auc_score_click, o_group_auc_click, o_u_avg_auc_click, _, _ = ut.multi_auc(
             res_click)
         print(model_path, "test_click auc:%f gauc:%f uauc:%f size:%d loss:%f, pos: %d" % (
             auc_score_click, group_auc_click, u_avg_auc_click, len(res_click), loss_click_sum / len(res_click),
@@ -154,7 +154,7 @@ class Learner:
         print(model_path,
               "online_click auc:%f gauc:%f uauc:%f " % (o_auc_score_click, o_group_auc_click, o_u_avg_auc_click))
 
-        auc_score_ext, group_auc_ext, u_avg_auc_ext, o_auc_score_ext, o_group_auc_ext, o_u_avg_auc_ext = ut.multi_auc(
+        auc_score_ext, group_auc_ext, u_avg_auc_ext, o_auc_score_ext, o_group_auc_ext, o_u_avg_auc_ext, _, _ = ut.multi_auc(
             res_ext)
         print(model_path, "test_ext auc:%f gauc:%f uauc:%f size:%d loss:%f, pos: %d" % (
             auc_score_ext, group_auc_ext, u_avg_auc_ext, len(res_ext), loss_ext_sum / len(res_ext),
