@@ -45,7 +45,7 @@ class Learner:
             ckpt = tf.train.Checkpoint(model=model, optimizer=model.optimizer)
 
             first_batch = next(iter(train_data))
-            _ = model([first_batch['sids'], first_batch['fids']])
+            _ = model([first_batch['fea_ids'], first_batch['fea_vals']])
 
             dummy_grad = [tf.zeros_like(v) for v in model.trainable_variables]
             model.optimizer.apply_gradients(zip(dummy_grad, model.trainable_variables))
