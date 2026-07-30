@@ -87,7 +87,7 @@ class Learner:
             probe_files = self.get_day_files(data_arg, days[0])
             probe_ds = ut.ReadTFRecordV2(probe_files, shuffle_size=1, batch_size=batch_size, fetch_size=1, num_parallel=10)
             first_batch = next(iter(probe_ds))
-            _ = model([first_batch['sids'], first_batch['fids']])
+            _ = model([first_batch['fea_ids'], first_batch['fea_vals']])
 
             dummy_grad = [tf.zeros_like(v) for v in model.trainable_variables]
             model.optimizer.apply_gradients(zip(dummy_grad, model.trainable_variables))
