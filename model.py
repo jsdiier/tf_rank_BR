@@ -8,6 +8,7 @@ from tensorflow.python.framework import sparse_tensor
 from module.rankmixer_v4 import *
 from logger import logger
 from module.seq_attention import *
+from module.senet import SENet
 
 
 class Model(tf.keras.Model):
@@ -104,6 +105,9 @@ class Model(tf.keras.Model):
         # 初始化底层主网络
         self.rankmixer = RankMixer(t=16, token_dim=768, num_heads=16, num_experts=16, hidden_ratio=2,
                                    training=self.training)
+
+        # SENet：对 process_and_pool_fused 产出的每个特征槽做重要性重标定（仓库里已有实现，之前未接入）
+        self.senet = SENet(reduction_ratio=8)
         # 初始化序列网络
         self.seq_click_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_click_seq')
         self.seq_pay_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_pay_seq')
@@ -453,6 +457,9 @@ class Model(tf.keras.Model):
         sid_list, fid_list = self.transform(sids, fids)
 
         pooled_output, slot_mask = self.process_and_pool_fused(sid_list, fid_list)
+
+        # SENet：对每个特征槽做重要性重标定，再送入 lr/fm/embedding 分组抽取
+        pooled_output = self.senet(pooled_output, step=step)
 
         # lr part
         lr_indices = self.slot_id_table.lookup(tf.constant(model_conf.lr_slot_ids, dtype=tf.dtypes.int32))
