@@ -105,13 +105,13 @@ class Model(tf.keras.Model):
         self.rankmixer = RankMixer(t=16, token_dim=768, num_heads=16, num_experts=16, hidden_ratio=2,
                                    training=self.training)
         # 初始化序列网络
-        self.seq_click_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_click_seq')
-        self.seq_pay_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_pay_seq')
-        self.seq_12h_click_cate_id_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid',
+        self.seq_click_attention_layer = DIN_attention_Layer([128, 64], 'sigmoid', name='global_click_seq')
+        self.seq_pay_attention_layer = DIN_attention_Layer([128, 64], 'sigmoid', name='global_pay_seq')
+        self.seq_12h_click_cate_id_attention_layer = DIN_attention_Layer([128, 64], 'sigmoid',
                                                                          name='12h_click_cate_id_seq')
-        self.attention_layer_search_long_pay = DIN_attention_Layer([50, 20], 'sigmoid', name='search_pay_seq_long')
-        self.attention_layer_search_long_clk = DIN_attention_Layer([50, 20], 'sigmoid', name='search_clk_seq_long')
-        self.attention_layer_search_long_query = DIN_attention_Layer([50, 20], 'sigmoid', name='search_query_seq_long')
+        self.attention_layer_search_long_pay = DIN_attention_Layer([128, 64], 'sigmoid', name='search_pay_seq_long')
+        self.attention_layer_search_long_clk = DIN_attention_Layer([128, 64], 'sigmoid', name='search_clk_seq_long')
+        self.attention_layer_search_long_query = DIN_attention_Layer([128, 64], 'sigmoid', name='search_query_seq_long')
 
         # 搜索长序列：先融合多路 embedding，再与 DIN 注意力 + 均值池化残差组合，减轻「高维 concat 噪声」
         seq_token_dim = 32
