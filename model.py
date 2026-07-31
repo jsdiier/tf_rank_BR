@@ -131,28 +131,28 @@ class Model(tf.keras.Model):
 
         # 初始化4个任务塔
         self.buy_tower = tf.keras.Sequential()
-        for i, l in enumerate([256]):
+        for i, l in enumerate([256, 128]):
             if self.use_bn:
                 self.buy_tower.add(tf.keras.layers.BatchNormalization())
             self.buy_tower.add(
                 tf.keras.layers.Dense(l, activation=tf.nn.swish, kernel_regularizer=regularizers.l2(model_conf.l2_reg)))
 
         self.cat_tower = tf.keras.Sequential()
-        for i, l in enumerate([256]):
+        for i, l in enumerate([256, 128]):
             if self.use_bn:
                 self.cat_tower.add(tf.keras.layers.BatchNormalization())
             self.cat_tower.add(
                 tf.keras.layers.Dense(l, activation=tf.nn.swish, kernel_regularizer=regularizers.l2(model_conf.l2_reg)))
 
         self.click_tower = tf.keras.Sequential()
-        for i, l in enumerate([256]):
+        for i, l in enumerate([256, 128]):
             if self.use_bn:
                 self.click_tower.add(tf.keras.layers.BatchNormalization())
             self.click_tower.add(
                 tf.keras.layers.Dense(l, activation=tf.nn.swish, kernel_regularizer=regularizers.l2(model_conf.l2_reg)))
 
         self.ext_tower = tf.keras.Sequential()
-        for i, l in enumerate([256]):
+        for i, l in enumerate([256, 128]):
             if self.use_bn:
                 self.ext_tower.add(tf.keras.layers.BatchNormalization())
             self.ext_tower.add(
