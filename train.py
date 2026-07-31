@@ -29,7 +29,7 @@ class Learner:
             loss_buy = model.loss_bc(tf.expand_dims(feat['cvr_label'], 1), pred_buy)
             loss_cat = model.loss_bc(tf.expand_dims(feat['cat_label'], 1), pred_cat)
             loss_click = model.loss_bc(tf.expand_dims(feat['clk_label'], 1), pred_click)
-            loss_ext = model.loss_bc(tf.expand_dims(feat['ext_label'], 1), pred_ext)
+            loss_ext = model.loss_focal(tf.expand_dims(feat['ext_label'], 1), pred_ext)
 
             final_loss = loss_buy * buy_weight + loss_cat * cat_weight + loss_click * click_weight + loss_ext * ext_weight
 

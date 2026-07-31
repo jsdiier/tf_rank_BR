@@ -10,6 +10,17 @@ from logger import logger
 from module.seq_attention import *
 
 
+def focal_loss(y_true, y_pred, gamma=2.0, alpha=0.25):
+    """标准 focal loss，用于极端类别不平衡任务（如 ext）。调用方式与 tf.keras.losses.binary_crossentropy 一致。"""
+    y_true = tf.cast(y_true, tf.float32)
+    epsilon = tf.keras.backend.epsilon()
+    y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
+    pt = tf.where(tf.equal(y_true, 1.0), y_pred, 1.0 - y_pred)
+    alpha_factor = tf.where(tf.equal(y_true, 1.0), alpha, 1.0 - alpha)
+    loss = -alpha_factor * tf.pow(1.0 - pt, gamma) * tf.math.log(pt)
+    return tf.reduce_mean(loss, axis=-1)
+
+
 class Model(tf.keras.Model):
     def __init__(self, training=False, pred=False, fid_kv=None, fid_ads_kv=None, l2_reg=0.0001):
         super(Model, self).__init__()
@@ -27,6 +38,7 @@ class Model(tf.keras.Model):
         self.ads_layers_cache = {}
 
         self.loss_bc = tf.keras.losses.binary_crossentropy
+        self.loss_focal = focal_loss
         self.lr_schedule = tf.keras.optimizers.schedules.InverseTimeDecay(model_conf.learning_rate, decay_steps=1000000,
                                                                           decay_rate=1, staircase=False)
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.lr_schedule, beta_1=0.9, beta_2=0.999,
