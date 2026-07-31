@@ -104,6 +104,21 @@ class Model(tf.keras.Model):
         # 初始化底层主网络
         self.rankmixer = RankMixer(t=16, token_dim=768, num_heads=16, num_experts=16, hidden_ratio=2,
                                    training=self.training)
+
+        # Cross Network(DCN风格)：对 concat(lr+fm+rankmixer_output) 做显式有界阶数特征交叉
+        self.num_cross_layers = 2
+        self.concat_dim = model_conf.lr_emb_size + model_conf.fm_emb_size + 768
+        self.cross_w = [
+            self.add_weight(name='cross_w_{}'.format(i), shape=(self.concat_dim,),
+                            initializer='glorot_uniform', trainable=True)
+            for i in range(self.num_cross_layers)
+        ]
+        self.cross_b = [
+            self.add_weight(name='cross_b_{}'.format(i), shape=(self.concat_dim,),
+                            initializer='zeros', trainable=True)
+            for i in range(self.num_cross_layers)
+        ]
+
         # 初始化序列网络
         self.seq_click_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_click_seq')
         self.seq_pay_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_pay_seq')
@@ -576,6 +591,14 @@ class Model(tf.keras.Model):
         rankmixer_output = self.rankmixer(deep_input)
 
         concat = tf.concat([lr, fm, rankmixer_output], axis=1)
+
+        # Cross Network：x_{l+1} = x0 * (w_l · x_l) + b_l + x_l，显式建模浅层(lr/fm)与深层(rankmixer)间的特征交叉
+        cross_x0 = concat
+        cross_x = concat
+        for i in range(self.num_cross_layers):
+            xw = tf.reduce_sum(cross_x * self.cross_w[i], axis=1, keepdims=True)  # [B,1]
+            cross_x = cross_x0 * xw + self.cross_b[i] + cross_x
+        concat = cross_x
 
         buy_tower_output = self.buy_tower(concat, training=self.training)
         cat_tower_output = self.cat_tower(concat, training=self.training)
