@@ -104,6 +104,12 @@ class Model(tf.keras.Model):
         # 初始化底层主网络
         self.rankmixer = RankMixer(t=16, token_dim=768, num_heads=16, num_experts=16, hidden_ratio=2,
                                    training=self.training)
+
+        # LHUC 个性化门控：用 emb_user 生成缩放向量，对 rankmixer_output 做逐用户调制
+        self.lhuc_gate = tf.keras.Sequential([
+            tf.keras.layers.Dense(128, activation=tf.nn.relu, name='lhuc_gate_hidden'),
+            tf.keras.layers.Dense(768, activation='sigmoid', name='lhuc_gate_out'),
+        ])
         # 初始化序列网络
         self.seq_click_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_click_seq')
         self.seq_pay_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_pay_seq')
@@ -574,6 +580,10 @@ class Model(tf.keras.Model):
         additional_dims = tf.zeros([tf.shape(deep)[0], self.rankmixer.t - remain_dims])
         deep_input = tf.concat([deep, additional_dims], axis=1)
         rankmixer_output = self.rankmixer(deep_input)
+
+        # LHUC 个性化门控：用 emb_user 生成 [0,2] 范围的缩放向量，逐用户调制共享表征
+        lhuc_scale = 2.0 * self.lhuc_gate(emb_user)
+        rankmixer_output = rankmixer_output * lhuc_scale
 
         concat = tf.concat([lr, fm, rankmixer_output], axis=1)
 
