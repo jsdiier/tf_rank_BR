@@ -157,6 +157,20 @@ class Model(tf.keras.Model):
                 self.ext_tower.add(tf.keras.layers.BatchNormalization())
             self.ext_tower.add(
                 tf.keras.layers.Dense(l, activation=tf.nn.swish, kernel_regularizer=regularizers.l2(l2_reg)))
+
+        # MMoE：共享 expert + 各任务独立 gate，塔的输入从 concat 换成 gate 加权后的 expert 组合
+        self.num_experts = 4
+        self.moe_experts = [
+            tf.keras.layers.Dense(128, activation=tf.nn.swish,
+                                  kernel_regularizer=regularizers.l2(model_conf.l2_reg),
+                                  name='moe_expert_{}'.format(i))
+            for i in range(self.num_experts)
+        ]
+        self.moe_gate_buy = tf.keras.layers.Dense(self.num_experts, activation='softmax', name='moe_gate_buy')
+        self.moe_gate_cat = tf.keras.layers.Dense(self.num_experts, activation='softmax', name='moe_gate_cat')
+        self.moe_gate_click = tf.keras.layers.Dense(self.num_experts, activation='softmax', name='moe_gate_click')
+        self.moe_gate_ext = tf.keras.layers.Dense(self.num_experts, activation='softmax', name='moe_gate_ext')
+
         self.dense_concat = tf.keras.layers.Dense(1, activation="sigmoid",
                                                   kernel_regularizer=regularizers.l2(model_conf.l2_reg))
         self.dense_concat1 = tf.keras.layers.Dense(1, activation="sigmoid",
@@ -577,10 +591,22 @@ class Model(tf.keras.Model):
 
         concat = tf.concat([lr, fm, rankmixer_output], axis=1)
 
-        buy_tower_output = self.buy_tower(concat, training=self.training)
-        cat_tower_output = self.cat_tower(concat, training=self.training)
-        click_tower_output = self.click_tower(concat, training=self.training)
-        ext_tower_output = self.ext_tower(concat, training=self.training)
+        # MMoE：共享 expert 输出后，各任务用自己的 gate 加权组合，再送入原有单层任务头
+        expert_stack = tf.stack([expert(concat) for expert in self.moe_experts], axis=1)  # [B, num_experts, 128]
+
+        def _moe_combine(gate_layer):
+            gate = tf.expand_dims(gate_layer(concat), axis=-1)  # [B, num_experts, 1]
+            return tf.reduce_sum(expert_stack * gate, axis=1)  # [B, 128]
+
+        buy_moe_input = _moe_combine(self.moe_gate_buy)
+        cat_moe_input = _moe_combine(self.moe_gate_cat)
+        click_moe_input = _moe_combine(self.moe_gate_click)
+        ext_moe_input = _moe_combine(self.moe_gate_ext)
+
+        buy_tower_output = self.buy_tower(buy_moe_input, training=self.training)
+        cat_tower_output = self.cat_tower(cat_moe_input, training=self.training)
+        click_tower_output = self.click_tower(click_moe_input, training=self.training)
+        ext_tower_output = self.ext_tower(ext_moe_input, training=self.training)
 
         cvr_pred_org = self.dense_concat(buy_tower_output)
         cat_pred_org = self.dense_concat1(cat_tower_output)
