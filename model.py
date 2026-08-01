@@ -581,13 +581,14 @@ class Model(tf.keras.Model):
         click_tower_output = self.click_tower(concat, training=self.training)
         ext_tower_output = self.ext_tower(concat, training=self.training)
 
+        cat_pred_org = self.dense_concat1(cat_tower_output)
+        click_pred = self.dense_concat2(click_tower_output)
+
         buy_tower_input = tf.concat(
-            [concat, tf.stop_gradient(cat_tower_output), tf.stop_gradient(click_tower_output)], axis=1)
+            [concat, tf.stop_gradient(cat_pred_org), tf.stop_gradient(click_pred)], axis=1)
         buy_tower_output = self.buy_tower(buy_tower_input, training=self.training)
 
         cvr_pred_org = self.dense_concat(buy_tower_output)
-        cat_pred_org = self.dense_concat1(cat_tower_output)
-        click_pred = self.dense_concat2(click_tower_output)
         ext_pred = self.dense_concat3(ext_tower_output)
 
         cat_pred = cat_pred_org
