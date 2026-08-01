@@ -128,6 +128,7 @@ class Model(tf.keras.Model):
         self.query_seq_combine = tf.keras.layers.Dense(seq_token_dim, activation=tf.nn.swish,
                                                        kernel_regularizer=seq_reg)
         self.search_seq_dropout = tf.keras.layers.Dropout(0.1)
+        self.concat_dropout = tf.keras.layers.Dropout(0.1)
 
         # 初始化4个任务塔
         self.buy_tower = tf.keras.Sequential()
@@ -576,6 +577,7 @@ class Model(tf.keras.Model):
         rankmixer_output = self.rankmixer(deep_input)
 
         concat = tf.concat([lr, fm, rankmixer_output], axis=1)
+        concat = self.concat_dropout(concat, training=self.training)
 
         buy_tower_output = self.buy_tower(concat, training=self.training)
         cat_tower_output = self.cat_tower(concat, training=self.training)
