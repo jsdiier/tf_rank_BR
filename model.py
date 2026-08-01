@@ -166,6 +166,9 @@ class Model(tf.keras.Model):
         self.dense_concat3 = tf.keras.layers.Dense(1, activation="sigmoid",
                                                    kernel_regularizer=regularizers.l2(model_conf.l2_reg))
 
+        self.cascade_gate_cat = tf.keras.layers.Dense(1, activation='sigmoid')
+        self.cascade_gate_click = tf.keras.layers.Dense(1, activation='sigmoid')
+
     def set_summary_writer(self, writer, histogram_freq=100):
         self.summary_writer = writer
         self.histogram_freq = histogram_freq
@@ -581,8 +584,12 @@ class Model(tf.keras.Model):
         click_tower_output = self.click_tower(concat, training=self.training)
         ext_tower_output = self.ext_tower(concat, training=self.training)
 
+        cat_gate = self.cascade_gate_cat(concat)
+        click_gate = self.cascade_gate_click(concat)
         buy_tower_input = tf.concat(
-            [concat, tf.stop_gradient(cat_tower_output), tf.stop_gradient(click_tower_output)], axis=1)
+            [concat,
+             tf.stop_gradient(cat_tower_output) * cat_gate,
+             tf.stop_gradient(click_tower_output) * click_gate], axis=1)
         buy_tower_output = self.buy_tower(buy_tower_input, training=self.training)
 
         cvr_pred_org = self.dense_concat(buy_tower_output)
