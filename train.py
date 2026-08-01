@@ -21,7 +21,7 @@ class Learner:
         self.model.is_save_model = is_save_model
 
     @tf.function(experimental_relax_shapes=True)
-    def train_step(self, feat, buy_weight=1.0, cat_weight=1.0, click_weight=1.0, ext_weight=1.0):
+    def train_step(self, feat, buy_weight=2.0, cat_weight=1.0, click_weight=1.0, ext_weight=1.0):
         model = self.model
         with tf.GradientTape() as tape:
             pred_buy, pred_cat, pred_click, pred_ext = model([feat['fea_ids'], feat['fea_vals']])
