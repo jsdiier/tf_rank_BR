@@ -577,9 +577,11 @@ class Model(tf.keras.Model):
 
         concat = tf.concat([lr, fm, rankmixer_output], axis=1)
 
-        cat_tower_output = self.cat_tower(concat, training=self.training)
         click_tower_output = self.click_tower(concat, training=self.training)
         ext_tower_output = self.ext_tower(concat, training=self.training)
+
+        cat_tower_input = tf.concat([concat, tf.stop_gradient(click_tower_output)], axis=1)
+        cat_tower_output = self.cat_tower(cat_tower_input, training=self.training)
 
         buy_tower_input = tf.concat(
             [concat, tf.stop_gradient(cat_tower_output), tf.stop_gradient(click_tower_output)], axis=1)
