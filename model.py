@@ -505,10 +505,10 @@ class Model(tf.keras.Model):
             global_query_input,
             [tf.shape(global_query_input)[0], len(model_conf.global_seq_query_sids) * model_conf.fm_emb_size])
 
-        # pooled_output_v2, slot_mask_v2 = self.process_and_pool_fused(sid_list, fid_list, table_type='din_ads_table')
-        # ads_slot_indices = self.slot_id_table_din_ads.lookup(tf.constant(model_conf.ads_fea_slots, dtype=tf.dtypes.int32))
-        # ads_emb = tf.gather(pooled_output_v2, ads_slot_indices, axis=1)
-        # ads_emb = tf.reshape(ads_emb, [tf.shape(ads_emb)[0], -1])
+        pooled_output_v2, slot_mask_v2 = self.process_and_pool_fused(sid_list, fid_list, table_type='din_ads_table')
+        ads_slot_indices = self.slot_id_table_din_ads.lookup(tf.constant(model_conf.ads_fea_slots, dtype=tf.dtypes.int32))
+        ads_emb = tf.gather(pooled_output_v2, ads_slot_indices, axis=1)
+        ads_emb = tf.reshape(ads_emb, [tf.shape(ads_emb)[0], -1])
 
         seq_outputs = []
         for seq_name, seq_sid_ids in model_conf.seq_slot_dict.items():
@@ -523,6 +523,15 @@ class Model(tf.keras.Model):
                 seq_output = self.seq_12h_click_cate_id_attention_layer(
                     [global_query_input, seq_input, seq_input, seq_mask])
             seq_outputs.append(seq_output)
+
+        # 复活此前从未启用的 ads_emb 动态权重注意力：对点击序列再做一次 ads 条件化注意力
+        click_seq_slot_indices = self.slot_id_table.lookup(
+            tf.constant(model_conf.seq_slot_dict['user_click_seq'], dtype=tf.dtypes.int32))
+        click_seq_input = tf.gather(pooled_output[:, :, 1:], click_seq_slot_indices, axis=1)
+        click_seq_mask = tf.gather(slot_mask, click_seq_slot_indices, axis=1)
+        ads_click_attention_out = self.attention_din_ads(
+            global_query_input, click_seq_input, click_seq_mask, ads_emb, 'ads_click', [64, 32])
+        seq_outputs.append(ads_click_attention_out)
 
         # 搜索支付序列
         seq_slot_indices = self.slot_id_table.lookup(tf.constant(model_conf.search_long_pay_seq, dtype=tf.dtypes.int32))
