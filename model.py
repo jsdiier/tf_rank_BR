@@ -112,6 +112,7 @@ class Model(tf.keras.Model):
         self.attention_layer_search_long_pay = DIN_attention_Layer([50, 20], 'sigmoid', name='search_pay_seq_long')
         self.attention_layer_search_long_clk = DIN_attention_Layer([50, 20], 'sigmoid', name='search_clk_seq_long')
         self.attention_layer_search_long_query = DIN_attention_Layer([50, 20], 'sigmoid', name='search_query_seq_long')
+        self.shop_score_period_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='shop_score_period_seq')
 
         # 搜索长序列：先融合多路 embedding，再与 DIN 注意力 + 均值池化残差组合，减轻「高维 concat 噪声」
         seq_token_dim = 32
@@ -566,6 +567,22 @@ class Model(tf.keras.Model):
             self.attention_layer_search_long_query,
             self.query_seq_ln, self.query_seq_proj, self.query_seq_combine)
         seq_outputs.append(query_search_long_seq_out)
+
+        # 店铺偏好分×当前时段注意力：7个时段的店铺偏好分(d60_shop_score_p0..p6_log)当伪序列，当前请求的 period 当 query 做 DIN 注意力
+        shop_score_period_slot_ids = [1160, 1161, 1162, 1163, 1164, 1165, 1166]
+        shop_score_period_indices = self.slot_id_table.lookup(
+            tf.constant(shop_score_period_slot_ids, dtype=tf.dtypes.int32))
+        shop_score_period_seq = tf.gather(pooled_output[:, :, 1:], shop_score_period_indices, axis=1)
+        shop_score_period_mask = tf.gather(slot_mask, shop_score_period_indices, axis=1)
+
+        period_query_indices = self.slot_id_table.lookup(tf.constant([40], dtype=tf.dtypes.int32))
+        period_query = tf.reshape(
+            tf.gather(pooled_output[:, :, 1:], period_query_indices, axis=1),
+            [tf.shape(pooled_output)[0], model_conf.fm_emb_size])
+
+        shop_score_period_out = self.shop_score_period_attention_layer(
+            [period_query, shop_score_period_seq, shop_score_period_seq, shop_score_period_mask])
+        seq_outputs.append(shop_score_period_out)
 
         deep = tf.concat([emb_user, emb_shop, emb_interact] + seq_outputs, axis=-1)
 
