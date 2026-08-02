@@ -5,7 +5,7 @@ gpu_id = '0,'
 done_file_path = 'model/model.done'
 
 epoch_num = 1
-batch_size = 1024
+batch_size = 256
 learning_rate = 0.0003
 l2_reg = 0.0001
 use_bn = True
