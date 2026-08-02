@@ -166,6 +166,9 @@ class Model(tf.keras.Model):
         self.dense_concat3 = tf.keras.layers.Dense(1, activation="sigmoid",
                                                    kernel_regularizer=regularizers.l2(model_conf.l2_reg))
 
+        self.his_recency_proj = tf.keras.layers.Dense(32, activation=tf.nn.swish,
+                                                       kernel_regularizer=regularizers.l2(model_conf.l2_reg))
+
     def set_summary_writer(self, writer, histogram_freq=100):
         self.summary_writer = writer
         self.histogram_freq = histogram_freq
@@ -566,6 +569,19 @@ class Model(tf.keras.Model):
             self.attention_layer_search_long_query,
             self.query_seq_ln, self.query_seq_proj, self.query_seq_combine)
         seq_outputs.append(query_search_long_seq_out)
+
+        # 历史店铺命中×新鲜度交互：his_i_matched(是否命中最近第i单历史店铺) × d_his_i_gap(距今多久)
+        his_matched_slot_ids = [94, 98, 102]
+        his_gap_slot_ids = [96, 100, 104]
+        his_matched_indices = self.slot_id_table.lookup(tf.constant(his_matched_slot_ids, dtype=tf.dtypes.int32))
+        his_gap_indices = self.slot_id_table.lookup(tf.constant(his_gap_slot_ids, dtype=tf.dtypes.int32))
+        his_matched_emb = tf.gather(pooled_output[:, :, 1:], his_matched_indices, axis=1)
+        his_gap_emb = tf.gather(pooled_output[:, :, 1:], his_gap_indices, axis=1)
+        his_recency_cross = his_matched_emb * his_gap_emb
+        his_recency_cross = tf.reshape(
+            his_recency_cross, [tf.shape(his_recency_cross)[0], len(his_matched_slot_ids) * model_conf.fm_emb_size])
+        his_recency_out = self.his_recency_proj(his_recency_cross)
+        seq_outputs.append(his_recency_out)
 
         deep = tf.concat([emb_user, emb_shop, emb_interact] + seq_outputs, axis=-1)
 
