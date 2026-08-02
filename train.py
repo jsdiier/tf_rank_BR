@@ -115,28 +115,30 @@ class Learner:
         self.gstep = 0
 
         print('training...')
-        for idx, day in enumerate(days):
-            files = self.get_day_files(data_arg, day)
-            if not files:
-                print(datetime.datetime.now(), "day %s: no files found, skip" % day)
-                continue
-            print(datetime.datetime.now(), "==== start day %s (%d/%d), %d files ====" % (
-                day, idx + 1, len(days), len(files)))
+        for epoch in range(model_conf.epoch_num):
+            print(datetime.datetime.now(), "==== epoch %d/%d ====" % (epoch + 1, model_conf.epoch_num))
+            for idx, day in enumerate(days):
+                files = self.get_day_files(data_arg, day)
+                if not files:
+                    print(datetime.datetime.now(), "day %s: no files found, skip" % day)
+                    continue
+                print(datetime.datetime.now(), "==== start day %s (%d/%d), %d files ====" % (
+                    day, idx + 1, len(days), len(files)))
 
-            #train one pass over this day(训练完当天直接算指标写入 metrics 文件)
-            self.set_training_mode(True, False)
-            ds = ut.ReadTFRecordV2(files, shuffle_size=shuffle_size, batch_size=batch_size, fetch_size=10, num_parallel=10)
-            ds = ds.apply(tf.data.experimental.ignore_errors())
-            self.train_one_day(ds, day, train_writer, mfout)
+                #train one pass over this day(训练完当天直接算指标写入 metrics 文件)
+                self.set_training_mode(True, False)
+                ds = ut.ReadTFRecordV2(files, shuffle_size=shuffle_size, batch_size=batch_size, fetch_size=10, num_parallel=10)
+                ds = ds.apply(tf.data.experimental.ignore_errors())
+                self.train_one_day(ds, day, train_writer, mfout)
 
-            #当天训练的 summary 落盘
-            if train_writer is not None:
-                train_writer.flush()
+                #当天训练的 summary 落盘
+                if train_writer is not None:
+                    train_writer.flush()
 
-            #每 N 天保存一个 ckpt(最后一天也保存)
-            is_last = (idx == len(days) - 1)
-            if (idx + 1) % model_conf.ckpt_save_days == 0 or is_last:
-                self.save_checkpoint(day)
+                #每 N 天保存一个 ckpt(最后一天也保存)
+                is_last = (epoch == model_conf.epoch_num - 1) and (idx == len(days) - 1)
+                if (idx + 1) % model_conf.ckpt_save_days == 0 or is_last:
+                    self.save_checkpoint(day)
 
         mfout.close()
         print(datetime.datetime.now(), "metrics written to %s" % metric_path)
