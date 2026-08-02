@@ -112,6 +112,7 @@ class Model(tf.keras.Model):
         self.attention_layer_search_long_pay = DIN_attention_Layer([50, 20], 'sigmoid', name='search_pay_seq_long')
         self.attention_layer_search_long_clk = DIN_attention_Layer([50, 20], 'sigmoid', name='search_clk_seq_long')
         self.attention_layer_search_long_query = DIN_attention_Layer([50, 20], 'sigmoid', name='search_query_seq_long')
+        self.brand_affinity_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='brand_affinity_seq')
 
         # 搜索长序列：先融合多路 embedding，再与 DIN 注意力 + 均值池化残差组合，减轻「高维 concat 噪声」
         seq_token_dim = 32
@@ -566,6 +567,21 @@ class Model(tf.keras.Model):
             self.attention_layer_search_long_query,
             self.query_seq_ln, self.query_seq_proj, self.query_seq_combine)
         seq_outputs.append(query_search_long_seq_out)
+
+        # 品牌偏好注意力：48维用户品牌偏好向量(up_s_brand_1..48)当伪序列，当前店铺品牌(s_brand_map)当 query 做 DIN 注意力
+        brand_pref_slot_ids = list(range(1421, 1469))
+        brand_pref_indices = self.slot_id_table.lookup(tf.constant(brand_pref_slot_ids, dtype=tf.dtypes.int32))
+        brand_pref_seq = tf.gather(pooled_output[:, :, 1:], brand_pref_indices, axis=1)
+        brand_pref_mask = tf.gather(slot_mask, brand_pref_indices, axis=1)
+
+        shop_brand_query_indices = self.slot_id_table.lookup(tf.constant([67], dtype=tf.dtypes.int32))
+        shop_brand_query = tf.reshape(
+            tf.gather(pooled_output[:, :, 1:], shop_brand_query_indices, axis=1),
+            [tf.shape(pooled_output)[0], model_conf.fm_emb_size])
+
+        brand_affinity_out = self.brand_affinity_attention_layer(
+            [shop_brand_query, brand_pref_seq, brand_pref_seq, brand_pref_mask])
+        seq_outputs.append(brand_affinity_out)
 
         deep = tf.concat([emb_user, emb_shop, emb_interact] + seq_outputs, axis=-1)
 
