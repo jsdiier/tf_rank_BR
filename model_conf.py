@@ -7,7 +7,7 @@ done_file_path = 'model/model.done'
 epoch_num = 1
 batch_size = 1024
 learning_rate = 0.0003
-l2_reg = 0.0001
+l2_reg = 0.00002
 use_bn = True
 
 feature_size = 5000000
