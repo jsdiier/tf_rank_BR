@@ -166,6 +166,9 @@ class Model(tf.keras.Model):
         self.dense_concat3 = tf.keras.layers.Dense(1, activation="sigmoid",
                                                    kernel_regularizer=regularizers.l2(model_conf.l2_reg))
 
+        self.dcos_cross_proj = tf.keras.layers.Dense(16, activation=tf.nn.swish,
+                                                      kernel_regularizer=regularizers.l2(model_conf.l2_reg))
+
     def set_summary_writer(self, writer, histogram_freq=100):
         self.summary_writer = writer
         self.histogram_freq = histogram_freq
@@ -566,6 +569,17 @@ class Model(tf.keras.Model):
             self.attention_layer_search_long_query,
             self.query_seq_ln, self.query_seq_proj, self.query_seq_combine)
         seq_outputs.append(query_search_long_seq_out)
+
+        # 配送费 客户端预估(dummy_dcos) × 真实值(dummy_dcos_t) 交叉；eta/distance 都有这个 client-vs-truth 交叉，dcos 唯独没有，属遗漏
+        dcos_indices = self.slot_id_table.lookup(tf.constant([24], dtype=tf.dtypes.int32))
+        dcos_t_indices = self.slot_id_table.lookup(tf.constant([25], dtype=tf.dtypes.int32))
+        dcos_emb = tf.reshape(
+            tf.gather(pooled_output[:, :, 1:], dcos_indices, axis=1), [tf.shape(pooled_output)[0], model_conf.fm_emb_size])
+        dcos_t_emb = tf.reshape(
+            tf.gather(pooled_output[:, :, 1:], dcos_t_indices, axis=1), [tf.shape(pooled_output)[0], model_conf.fm_emb_size])
+        dcos_cross = dcos_emb * dcos_t_emb
+        dcos_cross_out = self.dcos_cross_proj(dcos_cross)
+        seq_outputs.append(dcos_cross_out)
 
         deep = tf.concat([emb_user, emb_shop, emb_interact] + seq_outputs, axis=-1)
 
