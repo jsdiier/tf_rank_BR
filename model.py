@@ -28,7 +28,7 @@ class Model(tf.keras.Model):
 
         self.loss_bc = tf.keras.losses.binary_crossentropy
         self.lr_schedule = tf.keras.optimizers.schedules.InverseTimeDecay(model_conf.learning_rate, decay_steps=1000000,
-                                                                          decay_rate=1, staircase=False)
+                                                                          decay_rate=model_conf.lr_decay_rate, staircase=False)
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.lr_schedule, beta_1=0.9, beta_2=0.999,
                                                   epsilon=1e-07, amsgrad=False, name='Adam')
 
