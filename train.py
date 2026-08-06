@@ -34,7 +34,7 @@ class Learner:
             final_loss = loss_buy * buy_weight + loss_cat * cat_weight + loss_click * click_weight + loss_ext * ext_weight
 
             gradients = tape.gradient(final_loss, model.trainable_weights)
-        model.optimizer.apply_gradients(zip(gradients, model.trainable_weights))
+        model.apply_gradients_dual(gradients)
         return loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext
 
     def _date_range(self, start, end):
@@ -82,15 +82,14 @@ class Learner:
         ckpt_path = self.get_model_checkpoint_from_file(model_conf.done_file_path)
         if ckpt_path is not None:
             print("load model from checkpoint:", ckpt_path)
-            ckpt = tf.train.Checkpoint(model=model, optimizer=model.optimizer)
+            ckpt = tf.train.Checkpoint(model=model, optimizer=model.optimizer, optimizer_emb=model.optimizer_emb)
 
             probe_files = self.get_day_files(data_arg, days[0])
             probe_ds = ut.ReadTFRecordV2(probe_files, shuffle_size=1, batch_size=batch_size, fetch_size=1, num_parallel=10)
             first_batch = next(iter(probe_ds))
             _ = model([first_batch['fea_ids'], first_batch['fea_vals']])
 
-            dummy_grad = [tf.zeros_like(v) for v in model.trainable_variables]
-            model.optimizer.apply_gradients(zip(dummy_grad, model.trainable_variables))
+            model.warmup_optimizers()
 
             ckpt.restore(tf.train.latest_checkpoint(ckpt_path)).assert_consumed()
             print("Restored optimizer step: ", model.optimizer.iterations.numpy())
@@ -255,7 +254,7 @@ class Learner:
         model = self.model
         save_dir = "%s/checkpoints/%s/" % (model_conf.local_model_dir, day)
         export_dir = save_dir + "tfmodel"
-        ckpt = tf.train.Checkpoint(model=model, optimizer=model.optimizer)
+        ckpt = tf.train.Checkpoint(model=model, optimizer=model.optimizer, optimizer_emb=model.optimizer_emb)
         ckpt.save(export_dir)
 
         done_dir = os.path.dirname(model_conf.done_file_path)

@@ -10,6 +10,29 @@ from logger import logger
 from module.seq_attention import *
 
 
+class InverseTimeDecayWithMin(tf.keras.optimizers.schedules.LearningRateSchedule):
+    """InverseTimeDecay + 下限，避免长跑/快衰减后 lr 无限变小。"""
+
+    def __init__(self, initial_learning_rate, decay_steps, decay_rate=1.0, min_learning_rate=1e-4,
+                 staircase=False):
+        super(InverseTimeDecayWithMin, self).__init__()
+        self._schedule = tf.keras.optimizers.schedules.InverseTimeDecay(
+            initial_learning_rate=initial_learning_rate,
+            decay_steps=decay_steps,
+            decay_rate=decay_rate,
+            staircase=staircase,
+        )
+        self.min_learning_rate = float(min_learning_rate)
+
+    def __call__(self, step):
+        return tf.maximum(self._schedule(step), self.min_learning_rate)
+
+    def get_config(self):
+        cfg = self._schedule.get_config()
+        cfg['min_learning_rate'] = self.min_learning_rate
+        return cfg
+
+
 class Model(tf.keras.Model):
     def __init__(self, training=False, pred=False, fid_kv=None, fid_ads_kv=None, l2_reg=0.0001):
         super(Model, self).__init__()
@@ -27,10 +50,18 @@ class Model(tf.keras.Model):
         self.ads_layers_cache = {}
 
         self.loss_bc = tf.keras.losses.binary_crossentropy
-        self.lr_schedule = tf.keras.optimizers.schedules.InverseTimeDecay(model_conf.learning_rate, decay_steps=1000000,
-                                                                          decay_rate=1, staircase=False)
+        # dense：Adam + schedule；sparse emb：Adagrad（更大 lr），照搬 EVE luban_v17 配方
+        self.lr_schedule = InverseTimeDecayWithMin(
+            initial_learning_rate=model_conf.learning_rate,
+            decay_steps=model_conf.lr_decay_steps,
+            decay_rate=model_conf.lr_decay_rate,
+            min_learning_rate=model_conf.lr_min,
+            staircase=False,
+        )
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.lr_schedule, beta_1=0.9, beta_2=0.999,
-                                                  epsilon=1e-07, amsgrad=False, name='Adam')
+                                                  epsilon=1e-07, amsgrad=False, name='AdamDense')
+        self.optimizer_emb = tf.keras.optimizers.Adagrad(
+            learning_rate=model_conf.emb_learning_rate, name='AdagradEmb')
 
         # embedding table
         self.emb_fm = tf.keras.layers.Embedding(
@@ -102,7 +133,7 @@ class Model(tf.keras.Model):
         # self.bn = tf.keras.layers.BatchNormalization(momentum=0.99,epsilon=1e-3,center=True,scale=False)
 
         # 初始化底层主网络
-        self.rankmixer = RankMixer(t=16, token_dim=768, num_heads=16, num_experts=16, hidden_ratio=2,
+        self.rankmixer = RankMixer(t=32, token_dim=768, num_heads=32, num_experts=32, hidden_ratio=2,
                                    training=self.training)
         # 初始化序列网络
         self.seq_click_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_click_seq')
@@ -131,28 +162,28 @@ class Model(tf.keras.Model):
 
         # 初始化4个任务塔
         self.buy_tower = tf.keras.Sequential()
-        for i, l in enumerate([256]):
+        for i, l in enumerate([256, 128]):
             if self.use_bn:
                 self.buy_tower.add(tf.keras.layers.BatchNormalization())
             self.buy_tower.add(
                 tf.keras.layers.Dense(l, activation=tf.nn.swish, kernel_regularizer=regularizers.l2(model_conf.l2_reg)))
 
         self.cat_tower = tf.keras.Sequential()
-        for i, l in enumerate([256]):
+        for i, l in enumerate([256, 128]):
             if self.use_bn:
                 self.cat_tower.add(tf.keras.layers.BatchNormalization())
             self.cat_tower.add(
                 tf.keras.layers.Dense(l, activation=tf.nn.swish, kernel_regularizer=regularizers.l2(model_conf.l2_reg)))
 
         self.click_tower = tf.keras.Sequential()
-        for i, l in enumerate([256]):
+        for i, l in enumerate([256, 128]):
             if self.use_bn:
                 self.click_tower.add(tf.keras.layers.BatchNormalization())
             self.click_tower.add(
                 tf.keras.layers.Dense(l, activation=tf.nn.swish, kernel_regularizer=regularizers.l2(model_conf.l2_reg)))
 
         self.ext_tower = tf.keras.Sequential()
-        for i, l in enumerate([256]):
+        for i, l in enumerate([256, 128]):
             if self.use_bn:
                 self.ext_tower.add(tf.keras.layers.BatchNormalization())
             self.ext_tower.add(
@@ -165,6 +196,53 @@ class Model(tf.keras.Model):
                                                    kernel_regularizer=regularizers.l2(model_conf.l2_reg))
         self.dense_concat3 = tf.keras.layers.Dense(1, activation="sigmoid",
                                                    kernel_regularizer=regularizers.l2(model_conf.l2_reg))
+
+    @staticmethod
+    def _is_emb_var(var):
+        name = var.name.lower()
+        return (
+            'emb_fm' in name
+            or 'emb_din_ads' in name
+            or 'emb_lr' in name
+            or '/embeddings:' in name
+            or name.endswith('/embeddings')
+        )
+
+    def split_trainable_weights(self):
+        emb_vars, dense_vars = [], []
+        for v in self.trainable_weights:
+            if self._is_emb_var(v):
+                emb_vars.append(v)
+            else:
+                dense_vars.append(v)
+        return emb_vars, dense_vars
+
+    def apply_gradients_dual(self, gradients, variables=None):
+        """gradients 与 variables（默认 trainable_weights）一一对应；emb→Adagrad，其余→Adam。"""
+        if variables is None:
+            variables = self.trainable_weights
+        emb_pairs, dense_pairs = [], []
+        for grad, var in zip(gradients, variables):
+            if grad is None:
+                continue
+            if self._is_emb_var(var):
+                emb_pairs.append((grad, var))
+            else:
+                dense_pairs.append((grad, var))
+        if emb_pairs:
+            self.optimizer_emb.apply_gradients(emb_pairs)
+        if dense_pairs:
+            self.optimizer.apply_gradients(dense_pairs)
+
+    def warmup_optimizers(self):
+        """构建两个 optimizer 的 slot，供 checkpoint restore 使用。"""
+        emb_vars, dense_vars = self.split_trainable_weights()
+        if dense_vars:
+            self.optimizer.apply_gradients(
+                zip([tf.zeros_like(v) for v in dense_vars], dense_vars))
+        if emb_vars:
+            self.optimizer_emb.apply_gradients(
+                zip([tf.zeros_like(v) for v in emb_vars], emb_vars))
 
     def set_summary_writer(self, writer, histogram_freq=100):
         self.summary_writer = writer

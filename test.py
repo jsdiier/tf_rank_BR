@@ -42,13 +42,12 @@ class Learner:
         #ckpt_path="model/checkpoints/20260430_0/"
         if ckpt_path is not None:
             print("load model from checkpoint:", ckpt_path)
-            ckpt = tf.train.Checkpoint(model=model, optimizer=model.optimizer)
+            ckpt = tf.train.Checkpoint(model=model, optimizer=model.optimizer, optimizer_emb=model.optimizer_emb)
 
             first_batch = next(iter(train_data))
             _ = model([first_batch['fea_ids'], first_batch['fea_vals']])
 
-            dummy_grad = [tf.zeros_like(v) for v in model.trainable_variables]
-            model.optimizer.apply_gradients(zip(dummy_grad, model.trainable_variables))
+            model.warmup_optimizers()
 
             #ckpt.restore(tf.train.latest_checkpoint(ckpt_path)).expect_partial()
             ckpt.restore(tf.train.latest_checkpoint(ckpt_path)).assert_consumed()
