@@ -7,6 +7,12 @@ done_file_path = 'model/model.done'
 epoch_num = 1
 batch_size = 512
 learning_rate = 0.001
+# InverseTimeDecayWithMin：lr = max(lr0/(1+decay_rate*step/decay_steps), lr_min)，照搬 EVE luban_v8 配方
+lr_decay_steps = 100000
+lr_decay_rate = 1.0
+lr_min = 1e-4
+# 稀疏 embedding 走 Adagrad 的学习率（稠密层走上面的 learning_rate + Adam）
+emb_learning_rate = 0.05
 l2_reg = 0.0001
 use_bn = True
 
