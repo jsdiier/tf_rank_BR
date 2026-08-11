@@ -7,6 +7,7 @@ done_file_path = 'model/model.done'
 epoch_num = 1
 batch_size = 1024
 learning_rate = 0.0003
+buy_pos_weight = 2.0
 l2_reg = 0.0001
 use_bn = True
 
