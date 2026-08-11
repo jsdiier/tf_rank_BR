@@ -28,6 +28,54 @@ user_fea_list = [796,798,800,801,804,806,808,810,811,813,815,817,819,822,824,826
 shop_fea_list = [48, 75, 76, 77, 78, 79, 1414, 1518, 697, 698, 700, 910, 911, 988, 989, 991, 43, 46, 49, 50, 2, 4, 6, 8, 10, 28, 30, 32, 34, 52, 53, 54, 56, 57, 58, 59, 60, 61, 62, 63, 64, 80, 81, 83, 84, 86, 87, 36, 159, 160, 161, 162, 163, 164, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 1415, 1416, 1417, 1418, 1419, 1420, 694, 695, 696, 699, 702, 703, 704, 68, 67, 902, 904, 762, 763, 764, 576, 577, 578, 579, 580, 581, 582, 587, 588, 589, 590, 591, 592, 593, 598, 599, 600, 601, 602, 603, 604, 609, 610, 611, 612, 613, 614, 615, 42, 429, 431, 433, 435, 437, 439, 441, 443, 445, 446, 447, 448, 449, 450, 451, 452, 454, 456, 458, 460, 462, 464, 466, 468, 470, 471, 472, 473, 474, 475, 476, 477, 479, 481, 483, 485, 487, 489, 491, 493, 495, 496, 497, 498, 499, 500, 501, 502, 504, 506, 508, 510, 512, 514, 516, 518, 520, 521, 522, 523, 524, 525, 526, 527, 717]
 interact_fea_list = [1046, 1047, 1048, 1049, 1050, 1051, 1052, 1053, 1054, 1055, 1056, 1057, 1058, 1059, 1060, 1061, 1160, 1161, 1162, 1163, 1164, 1165, 1166, 265, 266, 267, 268, 269, 270, 271, 272, 278, 279, 280, 281, 282, 283, 284, 285, 291, 292, 293, 294, 295, 296, 297, 298, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 705, 706, 707, 708, 709, 710, 711, 712, 774, 773, 776, 742, 746, 750, 754, 758, 741, 745, 749, 753, 757, 743, 747, 751, 755, 759, 744, 748, 752, 756, 760, 620, 621, 622, 623, 624, 625, 626, 631, 632, 633, 634, 635, 636, 637, 642, 643, 644, 645, 646, 647, 648, 653, 654, 655, 656, 657, 658, 659, 94, 96, 98, 100, 102, 104, 14, 38, 718, 1421, 1422, 1423, 1428, 1429, 1430, 1431, 1432, 1433, 1434, 1435, 1440, 1441, 1442, 1443, 1444, 1445, 1446, 1447, 1452, 1453, 1454, 1455, 1456, 1457, 1458, 1459, 1464, 1465, 1466, 1467, 1468, 156, 158, 846, 848, 1208, 1209, 1210, 1211, 1212, 1213, 1244, 1245, 1246, 1247, 1248, 1249, 1357, 1264, 1265, 12, 834, 832, 843, 841, 1196, 1197, 1198, 1199, 1200, 1201, 1266, 1267, 1268, 1269, 1270, 1271, 1272, 1273, 1288, 1289, 1290, 1291, 1292, 1293]
 
+# RankMixer 语义 token 分组。普通 slot 只允许属于一个组；序列输出在 model.py 中另占 6 个 token。
+_semantic_user_base_context = [1517, 66, 761, 39, 40, 41, 82, 713, 65, 85]
+_semantic_user_price_promo = [796, 798, 801, 804, 806, 808, 810, 811, 813, 815, 817, 819, 822, 824, 826, 828,
+                              1118, 1119, 1120, 1121, 1122, 1123, 1124, 1132, 1133, 1134, 1135, 1136,
+                              1137, 1138, 1146, 1147, 1148, 1149, 1150, 1151, 1152, 227, 237, 247, 257,
+                              860, 211, 200, 202, 204, 206, 208, 210, 887, 875, 877, 879, 881, 883, 885,
+                              345, 352, 370, 377, 167, 914, 947, 194, 196, 198, 732, 733, 740, 1390,
+                              714, 716]
+_semantic_user_preference = [910, 911, 69, 70, 71, 88, 90, 91, 92, 906, 907, 908, 93, 101, 97, 933, 934,
+                             1469, 1470, 1471, 1476, 1477, 1478, 1479, 1480, 1481, 1482, 1483, 1488,
+                             1489, 1490, 1491, 1492, 1493, 1494, 1495, 1500, 1501, 1502, 1503, 1504,
+                             1505, 1506, 1507, 1512, 1513, 1514, 1515, 1516, 72, 73, 74, 840, 831, 895,
+                             897, 899, 900, 913, 936, 938, 940, 942, 977, 979]
+_semantic_request_fulfillment = [889, 891, 893, 44, 45, 16, 17, 18, 20, 21, 22, 24, 25, 982, 719]
+_semantic_user_reserved = (set(_semantic_user_base_context) | set(_semantic_user_price_promo) |
+                           set(_semantic_user_preference) | set(_semantic_request_fulfillment))
+_semantic_user_activity_stage = [sid for sid in user_fea_list if sid not in _semantic_user_reserved]
+
+_semantic_shop_identity_content = [48, 75, 76, 77, 78, 79, 1518, 697, 698, 700, 988, 989, 991, 49, 50, 83,
+                                   84, 694, 68, 67, 902, 904]
+_semantic_shop_quality_service = [1414, 43, 46, 52, 53, 54, 56, 57, 58, 80, 81, 86, 87, 1415, 1416, 1418,
+                                  699, 704, 762, 763, 764, 42, 717]
+_semantic_shop_price_promo = [10, 28, 30, 32, 159, 160, 161, 162, 163, 164, 180, 181, 182, 183, 184, 185,
+                              186, 187, 188, 189, 190, 191, 192, 1417, 1419, 1420, 696, 445, 470, 495, 520]
+_semantic_shop_reserved = (set(_semantic_shop_identity_content) | set(_semantic_shop_quality_service) |
+                           set(_semantic_shop_price_promo) | {910, 911})
+_semantic_shop_traffic_business = [sid for sid in shop_fea_list if sid not in _semantic_shop_reserved]
+
+semantic_slot_groups = [
+    ('user_base_context', _semantic_user_base_context),
+    ('user_activity_stage', _semantic_user_activity_stage),
+    ('user_price_promo', _semantic_user_price_promo),
+    ('user_preference', _semantic_user_preference),
+    ('request_fulfillment', _semantic_request_fulfillment),
+    ('shop_identity_content', _semantic_shop_identity_content),
+    ('shop_quality_service', _semantic_shop_quality_service),
+    ('shop_price_promo', _semantic_shop_price_promo),
+    ('shop_traffic_business', _semantic_shop_traffic_business),
+    ('user_shop_match', list(interact_fea_list)),
+]
+
+_semantic_expected_slots = set(user_fea_list) | set(shop_fea_list) | set(interact_fea_list)
+_semantic_grouped_slots = [sid for _, group_slots in semantic_slot_groups for sid in group_slots]
+assert len(semantic_slot_groups) == 10
+assert len(_semantic_expected_slots) == 758
+assert len(_semantic_grouped_slots) == len(set(_semantic_grouped_slots)), 'semantic slot groups contain duplicates'
+assert set(_semantic_grouped_slots) == _semantic_expected_slots, 'semantic slot groups have missing or unknown slots'
+
 
 
 #全局点击，支付序列候选query sid

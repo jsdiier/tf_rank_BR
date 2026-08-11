@@ -347,6 +347,25 @@ class Model(tf.keras.Model):
         att = attention_layer([seq_query, x, x, mask])
         return combine_layer(tf.concat([att, pool], axis=-1))
 
+    def _semantic_mean_token(self, pooled_output, slot_mask, slot_ids):
+        """Pool one semantic slot group without adding trainable parameters."""
+        slot_indices = self.slot_id_table.lookup(tf.constant(slot_ids, dtype=tf.dtypes.int32))
+        group_emb = tf.gather(pooled_output[:, :, 1:], slot_indices, axis=1)
+        group_mask = tf.gather(slot_mask, slot_indices, axis=1)
+        group_mask = tf.expand_dims(group_mask, axis=-1)
+        group_sum = tf.reduce_sum(group_emb * group_mask, axis=1)
+        group_count = tf.reduce_sum(group_mask, axis=1)
+        return group_sum / tf.maximum(group_count, 1.0)
+
+    @staticmethod
+    def _pad_semantic_token(token, token_width=32):
+        token_dim = token.shape[-1]
+        if token_dim is None or token_dim > token_width:
+            raise ValueError('invalid semantic token dimension: {}'.format(token_dim))
+        if token_dim == token_width:
+            return token
+        return tf.pad(token, [[0, 0], [0, token_width - token_dim]])
+
     def ads_seq_cross_layer(self, name, nn_inputs, ads_emb, ads_hidden_dim=64, ads_output_dim=1):
         # ads_input_dim = nn_inputs.get_shape().as_list()[-1]
         ads_input_dim = tf.shape(nn_inputs)[-1]
@@ -567,12 +586,17 @@ class Model(tf.keras.Model):
             self.query_seq_ln, self.query_seq_proj, self.query_seq_combine)
         seq_outputs.append(query_search_long_seq_out)
 
-        deep = tf.concat([emb_user, emb_shop, emb_interact] + seq_outputs, axis=-1)
-
-        # 余数补dims
-        remain_dims = deep.shape[-1] % (self.rankmixer.t)
-        additional_dims = tf.zeros([tf.shape(deep)[0], self.rankmixer.t - remain_dims])
-        deep_input = tf.concat([deep, additional_dims], axis=1)
+        semantic_tokens = [
+            self._semantic_mean_token(pooled_output, slot_mask, slot_ids)
+            for _, slot_ids in model_conf.semantic_slot_groups
+        ]
+        semantic_tokens.extend(seq_outputs)
+        if len(semantic_tokens) != self.rankmixer.t:
+            raise ValueError('semantic token count must equal RankMixer.t: {} vs {}'.format(
+                len(semantic_tokens), self.rankmixer.t))
+        semantic_tokens = [self._pad_semantic_token(token) for token in semantic_tokens]
+        deep_tokens = tf.stack(semantic_tokens, axis=1)
+        deep_input = tf.reshape(deep_tokens, [tf.shape(deep_tokens)[0], self.rankmixer.t * 32])
         rankmixer_output = self.rankmixer(deep_input)
 
         concat = tf.concat([lr, fm, rankmixer_output], axis=1)
@@ -600,4 +624,3 @@ class Model(tf.keras.Model):
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
         return ctcvr, cat_pred, click_pred, ext_pred
-
