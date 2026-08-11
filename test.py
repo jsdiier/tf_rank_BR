@@ -73,6 +73,8 @@ class Learner:
         loss_cat_sum = 0.0
         loss_click_sum = 0.0
         loss_ext_sum = 0.0
+        loss_cvr_aux_sum = 0.0
+        clicked_count = 0
         pos_buy = 0
         pos_cat = 0
         pos_click = 0
@@ -85,17 +87,21 @@ class Learner:
         sum_pred_ext = 0.0
         for step, feat in enumerate(test_data):
             cnt += feat['cvr_label'].shape[0]
-            pred_buy, pred_cat, pred_click, pred_ext = self.model([feat['fea_ids'], feat['fea_vals']])
+            pred_buy, pred_cat, pred_click, pred_ext, pred_cvr = self.model([feat['fea_ids'], feat['fea_vals']])
 
             loss_buy = self.model.loss_bc(tf.expand_dims(feat['cvr_label'], 1), pred_buy)
             loss_cat = self.model.loss_bc(tf.expand_dims(feat['cat_label'], 1), pred_cat)
             loss_click = self.model.loss_bc(tf.expand_dims(feat['clk_label'], 1), pred_click)
             loss_ext = self.model.loss_bc(tf.expand_dims(feat['ext_label'], 1), pred_ext)
+            clicked_mask = tf.cast(feat['clk_label'], pred_cvr.dtype)
+            cvr_loss_per_sample = self.model.loss_bc(tf.expand_dims(feat['cvr_label'], 1), pred_cvr)
 
             loss_buy_sum += tf.reduce_sum(loss_buy, 0)
             loss_cat_sum += tf.reduce_sum(loss_cat, 0)
             loss_click_sum += tf.reduce_sum(loss_click, 0)
             loss_ext_sum += tf.reduce_sum(loss_ext, 0)
+            loss_cvr_aux_sum += tf.reduce_sum(clicked_mask * cvr_loss_per_sample, 0)
+            clicked_count += int(tf.reduce_sum(clicked_mask).numpy())
 
             pred_buy = tf.squeeze(pred_buy, 1).numpy().tolist()
             pred_cat = tf.squeeze(pred_cat, 1).numpy().tolist()
@@ -130,6 +136,8 @@ class Learner:
 
         print(datetime.datetime.now(), "buy loss:%04f, cat loss:%04f, click loss:%04f, ext loss:%04f" % (
               loss_buy_sum/len(res_buy), loss_cat_sum/len(res_cat), loss_click_sum/len(res_click), loss_ext_sum/len(res_ext)))
+        print(datetime.datetime.now(), "conditional cvr loss:%04f, clicked_count:%d" % (
+              loss_cvr_aux_sum / max(clicked_count, 1), clicked_count))
         print(datetime.datetime.now(), "pos_buy:%d, pos_cat:%d, pos_click:%d, pos_ext:%d, all_num:%d" % (pos_buy, pos_cat, pos_click, pos_ext, cnt))
         print(datetime.datetime.now(), "buy_rate:%04f, cat_rate:%04f, click_rate:%04f, ext_rate:%04f" % (pos_buy / cnt, pos_cat / cnt, pos_click / cnt, pos_ext / cnt))
         print(datetime.datetime.now(), "res_buy:%04f, res_cat:%04f, res_click:%04f, res_ext:%04f" % (sum_pred_buy / len(res_buy), sum_pred_cat / len(res_cat), sum_pred_click / len(res_click), sum_pred_ext  / len(res_ext)))
