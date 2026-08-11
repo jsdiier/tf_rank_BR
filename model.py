@@ -589,7 +589,10 @@ class Model(tf.keras.Model):
 
         cat_pred = cat_pred_org
 
-        ctcvr = tf.math.multiply(click_pred, cvr_pred_org)
+        # Keep the CTCVR forward value unchanged while preventing the sparse
+        # buy loss from updating the click tower during training.
+        click_for_buy = tf.stop_gradient(click_pred) if self.training else click_pred
+        ctcvr = tf.math.multiply(click_for_buy, cvr_pred_org)
 
         if self.is_save_model or self.pred:
             final_pred = ctcvr
@@ -600,4 +603,3 @@ class Model(tf.keras.Model):
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
         return ctcvr, cat_pred, click_pred, ext_pred
-
