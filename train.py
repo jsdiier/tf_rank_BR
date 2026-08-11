@@ -24,18 +24,25 @@ class Learner:
     def train_step(self, feat, buy_weight=1.0, cat_weight=1.0, click_weight=1.0, ext_weight=1.0):
         model = self.model
         with tf.GradientTape() as tape:
-            pred_buy, pred_cat, pred_click, pred_ext = model([feat['fea_ids'], feat['fea_vals']])
+            pred_buy, pred_cat, pred_click, pred_ext, pred_cvr = model([feat['fea_ids'], feat['fea_vals']])
 
             loss_buy = model.loss_bc(tf.expand_dims(feat['cvr_label'], 1), pred_buy)
             loss_cat = model.loss_bc(tf.expand_dims(feat['cat_label'], 1), pred_cat)
             loss_click = model.loss_bc(tf.expand_dims(feat['clk_label'], 1), pred_click)
             loss_ext = model.loss_bc(tf.expand_dims(feat['ext_label'], 1), pred_ext)
 
-            final_loss = loss_buy * buy_weight + loss_cat * cat_weight + loss_click * click_weight + loss_ext * ext_weight
+            clicked_mask = tf.cast(feat['clk_label'], pred_cvr.dtype)
+            cvr_loss_per_sample = model.loss_bc(tf.expand_dims(feat['cvr_label'], 1), pred_cvr)
+            loss_cvr_aux = tf.reduce_sum(clicked_mask * cvr_loss_per_sample) / tf.maximum(
+                tf.reduce_sum(clicked_mask), tf.constant(1.0, dtype=pred_cvr.dtype))
+
+            final_loss = (loss_buy * buy_weight + loss_cat * cat_weight + loss_click * click_weight
+                          + loss_ext * ext_weight + model_conf.cvr_aux_weight * loss_cvr_aux)
 
             gradients = tape.gradient(final_loss, model.trainable_weights)
         model.optimizer.apply_gradients(zip(gradients, model.trainable_weights))
-        return loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext
+        return (loss_buy, loss_cat, loss_click, loss_ext, loss_cvr_aux, final_loss,
+                pred_buy, pred_cat, pred_click, pred_ext)
 
     def _date_range(self, start, end):
         """返回 [start, end] 闭区间内的所有天(YYYYMMDD 字符串,升序)"""
@@ -167,7 +174,8 @@ class Learner:
             self.cnt += label_arrs[0].shape[0]
             self.pos += [a.sum() for a in label_arrs]
 
-            loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext = self.train_step(feat)
+            (loss_buy, loss_cat, loss_click, loss_ext, loss_cvr_aux, final_loss,
+             pred_buy, pred_cat, pred_click, pred_ext) = self.train_step(feat)
 
             #收集 uid 采样子集的 pred/label 到内存,当天训完直接算指标
             if mfout is not None:
@@ -199,6 +207,7 @@ class Learner:
                     tf.summary.scalar('loss_cat', tf.reduce_mean(loss_cat), step=global_step)
                     tf.summary.scalar('loss_click', tf.reduce_mean(loss_click), step=global_step)
                     tf.summary.scalar('loss_ext', tf.reduce_mean(loss_ext), step=global_step)
+                    tf.summary.scalar('loss_cvr_aux', loss_cvr_aux, step=global_step)
                     tf.summary.scalar('loss/total', tf.reduce_mean(final_loss), step=global_step)
 
                     tf.summary.scalar('data/pos_rate_buy', self.pos[0] / max(self.cnt, 1), step=global_step)
