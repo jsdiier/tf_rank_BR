@@ -102,8 +102,18 @@ class Model(tf.keras.Model):
         # self.bn = tf.keras.layers.BatchNormalization(momentum=0.99,epsilon=1e-3,center=True,scale=False)
 
         # 初始化底层主网络
-        self.rankmixer = RankMixer(t=16, token_dim=768, num_heads=16, num_experts=16, hidden_ratio=2,
+        self.rankmixer = RankMixer(t=model_conf.rankmixer_token_count, token_dim=model_conf.rankmixer_token_dim,
+                                   num_heads=None, num_experts=1, hidden_ratio=2,
                                    training=self.training)
+        token_reg = regularizers.l2(model_conf.l2_reg)
+        self.rankmixer_slot_projections = [
+            tf.keras.layers.Dense(model_conf.rankmixer_token_dim, kernel_regularizer=token_reg,
+                                  name='rankmixer_{}_projection'.format(name))
+            for name, _ in model_conf.rankmixer_slot_groups
+        ]
+        self.rankmixer_seq_projection = tf.keras.layers.Dense(
+            model_conf.rankmixer_token_dim, kernel_regularizer=token_reg,
+            name='rankmixer_seq_projection')
         # 初始化序列网络
         self.seq_click_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_click_seq')
         self.seq_pay_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_pay_seq')
@@ -470,14 +480,6 @@ class Model(tf.keras.Model):
         # all_emb = tf.gather(pooled_output, emb_slot_indices, axis=1)
         # all_emb = tf.reshape(all_emb, [tf.shape(all_emb)[0], -1])
 
-        # 获取user_emb
-        emb_user_indices = self.slot_id_table.lookup(tf.constant(model_conf.user_fea_list, dtype=tf.dtypes.int32))
-        emb_user = tf.gather(pooled_output[:, :, 1:], emb_user_indices, axis=1)
-        emb_user = tf.reshape(
-            emb_user,
-            [tf.shape(emb_user)[0], len(model_conf.user_fea_list) * model_conf.fm_emb_size])
-        logger.info("emb_user shape is {}".format(emb_user.shape))
-
         # 获取shop_emb
         emb_shop_indices = self.slot_id_table.lookup(tf.constant(model_conf.shop_fea_list, dtype=tf.dtypes.int32))
         emb_shop = tf.gather(pooled_output[:, :, 1:], emb_shop_indices, axis=1)
@@ -485,15 +487,6 @@ class Model(tf.keras.Model):
             emb_shop,
             [tf.shape(emb_shop)[0], len(model_conf.shop_fea_list) * model_conf.fm_emb_size])
         logger.info("emb_shop shape is {}".format(emb_shop.shape))
-
-        # 获取interact_emb
-        emb_interact_indices = self.slot_id_table.lookup(
-            tf.constant(model_conf.interact_fea_list, dtype=tf.dtypes.int32))
-        emb_interact = tf.gather(pooled_output[:, :, 1:], emb_interact_indices, axis=1)
-        emb_interact = tf.reshape(
-            emb_interact,
-            [tf.shape(emb_interact)[0], len(model_conf.interact_fea_list) * model_conf.fm_emb_size])
-        logger.info("emb_interact shape is {}".format(emb_interact.shape))
 
         # 获取sequence_emb
 
@@ -567,13 +560,22 @@ class Model(tf.keras.Model):
             self.query_seq_ln, self.query_seq_proj, self.query_seq_combine)
         seq_outputs.append(query_search_long_seq_out)
 
-        deep = tf.concat([emb_user, emb_shop, emb_interact] + seq_outputs, axis=-1)
-
-        # 余数补dims
-        remain_dims = deep.shape[-1] % (self.rankmixer.t)
-        additional_dims = tf.zeros([tf.shape(deep)[0], self.rankmixer.t - remain_dims])
-        deep_input = tf.concat([deep, additional_dims], axis=1)
-        rankmixer_output = self.rankmixer(deep_input)
+        rankmixer_tokens = []
+        rankmixer_slot_indices = self.slot_id_table.lookup(
+            tf.constant(model_conf.rankmixer_flat_slot_ids, dtype=tf.dtypes.int32))
+        rankmixer_slot_emb = tf.gather(pooled_output[:, :, 1:], rankmixer_slot_indices, axis=1)
+        group_start = 0
+        for projection, (_, slot_ids) in zip(self.rankmixer_slot_projections, model_conf.rankmixer_slot_groups):
+            group_end = group_start + len(slot_ids)
+            group_emb = rankmixer_slot_emb[:, group_start:group_end, :]
+            group_emb = tf.reshape(group_emb, [tf.shape(group_emb)[0], len(slot_ids) * model_conf.fm_emb_size])
+            rankmixer_tokens.append(projection(group_emb))
+            group_start = group_end
+        rankmixer_tokens.extend([self.rankmixer_seq_projection(seq_output) for seq_output in seq_outputs])
+        if len(rankmixer_tokens) != model_conf.rankmixer_token_count:
+            raise ValueError('RankMixer token count mismatch: {}'.format(len(rankmixer_tokens)))
+        rankmixer_input = tf.stack(rankmixer_tokens, axis=1)
+        rankmixer_output = self.rankmixer(rankmixer_input)
 
         concat = tf.concat([lr, fm, rankmixer_output], axis=1)
 
@@ -600,4 +602,3 @@ class Model(tf.keras.Model):
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
         return ctcvr, cat_pred, click_pred, ext_pred
-

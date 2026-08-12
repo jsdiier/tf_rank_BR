@@ -29,6 +29,43 @@ shop_fea_list = [48, 75, 76, 77, 78, 79, 1414, 1518, 697, 698, 700, 910, 911, 98
 interact_fea_list = [1046, 1047, 1048, 1049, 1050, 1051, 1052, 1053, 1054, 1055, 1056, 1057, 1058, 1059, 1060, 1061, 1160, 1161, 1162, 1163, 1164, 1165, 1166, 265, 266, 267, 268, 269, 270, 271, 272, 278, 279, 280, 281, 282, 283, 284, 285, 291, 292, 293, 294, 295, 296, 297, 298, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 705, 706, 707, 708, 709, 710, 711, 712, 774, 773, 776, 742, 746, 750, 754, 758, 741, 745, 749, 753, 757, 743, 747, 751, 755, 759, 744, 748, 752, 756, 760, 620, 621, 622, 623, 624, 625, 626, 631, 632, 633, 634, 635, 636, 637, 642, 643, 644, 645, 646, 647, 648, 653, 654, 655, 656, 657, 658, 659, 94, 96, 98, 100, 102, 104, 14, 38, 718, 1421, 1422, 1423, 1428, 1429, 1430, 1431, 1432, 1433, 1434, 1435, 1440, 1441, 1442, 1443, 1444, 1445, 1446, 1447, 1452, 1453, 1454, 1455, 1456, 1457, 1458, 1459, 1464, 1465, 1466, 1467, 1468, 156, 158, 846, 848, 1208, 1209, 1210, 1211, 1212, 1213, 1244, 1245, 1246, 1247, 1248, 1249, 1357, 1264, 1265, 12, 834, 832, 843, 841, 1196, 1197, 1198, 1199, 1200, 1201, 1266, 1267, 1268, 1269, 1270, 1271, 1272, 1273, 1288, 1289, 1290, 1291, 1292, 1293]
 
 
+def _split_slots(slot_ids, group_count, prefix):
+    """Split complete slot embeddings into balanced deterministic groups."""
+    base_size, remainder = divmod(len(slot_ids), group_count)
+    groups = []
+    start = 0
+    for index in range(group_count):
+        size = base_size + (1 if index < remainder else 0)
+        groups.append(("{}_{}".format(prefix, index), slot_ids[start:start + size]))
+        start += size
+    return groups
+
+
+# 910/911同时出现在user和shop列表；一个slot只进入一个普通token，因此shop侧去重。
+_rankmixer_user_slots = list(user_fea_list)
+_rankmixer_user_slot_set = set(_rankmixer_user_slots)
+_rankmixer_shop_slots = [sid for sid in shop_fea_list if sid not in _rankmixer_user_slot_set]
+_rankmixer_seen_slots = _rankmixer_user_slot_set | set(_rankmixer_shop_slots)
+_rankmixer_interact_slots = [sid for sid in interact_fea_list if sid not in _rankmixer_seen_slots]
+
+# 12个user token + 7个shop token + 7个interact token = 26个普通token。
+rankmixer_slot_groups = (
+    _split_slots(_rankmixer_user_slots, 12, 'user') +
+    _split_slots(_rankmixer_shop_slots, 7, 'shop') +
+    _split_slots(_rankmixer_interact_slots, 7, 'interact')
+)
+_rankmixer_expected_slots = set(user_fea_list) | set(shop_fea_list) | set(interact_fea_list)
+_rankmixer_grouped_slots = [sid for _, group in rankmixer_slot_groups for sid in group]
+assert len(rankmixer_slot_groups) == 26
+assert len(_rankmixer_expected_slots) == 758
+assert len(_rankmixer_grouped_slots) == len(set(_rankmixer_grouped_slots))
+assert set(_rankmixer_grouped_slots) == _rankmixer_expected_slots
+rankmixer_flat_slot_ids = list(_rankmixer_grouped_slots)
+
+rankmixer_token_count = 32
+rankmixer_token_dim = 256
+
+
 
 #全局点击，支付序列候选query sid
 global_seq_query_sids=[68]
@@ -59,6 +96,9 @@ padding_size = 2000
 ckpt_save_days = 10
 #评估时按 uid 采样的比例(0.01 = 1%)
 eval_uid_ratio = 0.2
+# 离线推理性能测试：先预热，再统计固定数量的完整batch。
+inference_benchmark_warmup_batches = 20
+inference_benchmark_measure_batches = 100
 #每条样本的 add_infos 字段个数
 add_info_field_num = 24
 #uid 在每条样本 add_infos 中的下标

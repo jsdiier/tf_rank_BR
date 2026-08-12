@@ -61,8 +61,82 @@ class Learner:
         ext_weight = 1.0
         print('testing...')
         self.set_training_mode(False)
+        self.benchmark_inference(train_data)
         self.test(train_data, model_path=ckpt_path or '')
         self.set_training_mode(True)
+
+    @staticmethod
+    def _sync_outputs(outputs):
+        """Wait for all GPU outputs while copying only one scalar to the host."""
+        sync_value = tf.add_n([tf.reduce_sum(output) for output in outputs])
+        return sync_value.numpy()
+
+    @staticmethod
+    def _latency_percentile(latencies, percentile):
+        return float(np.percentile(np.asarray(latencies, dtype=np.float64), percentile))
+
+    def benchmark_inference(self, test_data):
+        warmup_batches = model_conf.inference_benchmark_warmup_batches
+        measure_batches = model_conf.inference_benchmark_measure_batches
+        expected_batch_size = model_conf.batch_size
+        iterator = iter(test_data)
+
+        warmed = 0
+        while warmed < warmup_batches:
+            try:
+                feat = next(iterator)
+            except StopIteration:
+                break
+            if int(feat['cvr_label'].shape[0]) != expected_batch_size:
+                continue
+            outputs = self.model([feat['fea_ids'], feat['fea_vals']])
+            self._sync_outputs(outputs)
+            warmed += 1
+
+        model_latencies = []
+        end_to_end_latencies = []
+        measured_samples = 0
+        while len(model_latencies) < measure_batches:
+            end_to_end_start = time.perf_counter()
+            try:
+                feat = next(iterator)
+            except StopIteration:
+                break
+            batch_size = int(feat['cvr_label'].shape[0])
+            if batch_size != expected_batch_size:
+                continue
+
+            model_start = time.perf_counter()
+            outputs = self.model([feat['fea_ids'], feat['fea_vals']])
+            self._sync_outputs(outputs)
+            model_latencies.append(time.perf_counter() - model_start)
+
+            # Mirror the offline evaluator's host conversion without AUC aggregation.
+            for output in outputs:
+                output.numpy()
+            end_to_end_latencies.append(time.perf_counter() - end_to_end_start)
+            measured_samples += batch_size
+
+        if not model_latencies:
+            print('[INFERENCE_BENCHMARK] skipped: no complete batch available')
+            return
+
+        model_total = sum(model_latencies)
+        e2e_total = sum(end_to_end_latencies)
+        device = tf.test.gpu_device_name() or 'CPU'
+        print('[INFERENCE_BENCHMARK] device:%s batch_size:%d warmup_batches:%d measure_batches:%d samples:%d' % (
+            device, expected_batch_size, warmed, len(model_latencies), measured_samples))
+        print('[INFERENCE_BENCHMARK] model throughput_samples_s:%.3f latency_ms_sample:%.6f '
+              'batch_latency_p50_ms:%.3f batch_latency_p95_ms:%.3f' % (
+                  measured_samples / model_total,
+                  model_total * 1000.0 / measured_samples,
+                  self._latency_percentile(model_latencies, 50) * 1000.0,
+                  self._latency_percentile(model_latencies, 95) * 1000.0))
+        print('[INFERENCE_BENCHMARK] end_to_end throughput_samples_s:%.3f '
+              'batch_latency_p50_ms:%.3f batch_latency_p95_ms:%.3f' % (
+                  measured_samples / e2e_total,
+                  self._latency_percentile(end_to_end_latencies, 50) * 1000.0,
+                  self._latency_percentile(end_to_end_latencies, 95) * 1000.0))
 
     def test(self, test_data, model_path='', ):
         res_buy = []
