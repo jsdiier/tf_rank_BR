@@ -38,7 +38,7 @@ class Learner:
         model = self.model
 
         #load ckpt
-        ckpt_path = self.get_model_checkpoint_from_file(model_conf.done_file_path)
+        ckpt_path = model_path or self.get_model_checkpoint_from_file(model_conf.done_file_path)
         #ckpt_path="model/checkpoints/20260430_0/"
         if ckpt_path is not None:
             print("load model from checkpoint:", ckpt_path)
@@ -61,7 +61,7 @@ class Learner:
         ext_weight = 1.0
         print('testing...')
         self.set_training_mode(False)
-        self.test(train_data)
+        self.test(train_data, model_path=ckpt_path or '')
         self.set_training_mode(True)
 
     def test(self, test_data, model_path='', ):
@@ -198,6 +198,8 @@ if __name__ == "__main__":
     parse.add_argument('-data', type=str, help='input data files')
     parse.add_argument('-start_day', type=str, help='train start day')
     parse.add_argument('-end_day', type=str, help='train end day')
+    parse.add_argument('-checkpoint_path', type=str, default=None,
+                       help='explicit checkpoint directory; defaults to last entry in model.done')
 
     args = parse.parse_args()
     solver = Learner()
@@ -227,7 +229,7 @@ if __name__ == "__main__":
 
         #start training
         print('start training')
-        solver.train(ds, data_path=args.data)
+        solver.train(ds, model_path=args.checkpoint_path, data_path=args.data)
         end_time2 = time.time()
         using_time2 = end_time2 - end_time
         print('end training, using_time_training: ', using_time2)

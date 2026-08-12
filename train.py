@@ -58,7 +58,7 @@ class Learner:
                 files += tf.io.gfile.glob("%s/%s/part*" % (bp, day))
         return sorted(set(files))
 
-    def train(self, data_arg, start_day, end_day, model_path=None, data_path=None):
+    def train(self, data_arg, start_day, end_day, model_path=None, data_path=None, dump_serving_model=True):
         if self.model is None:
             self.model = Model(training=True)
         model = self.model
@@ -79,7 +79,7 @@ class Learner:
         shuffle_size = batch_size * 10
 
         #load ckpt (需要先跑一个 batch 建好变量再 restore)
-        ckpt_path = self.get_model_checkpoint_from_file(model_conf.done_file_path)
+        ckpt_path = model_path or self.get_model_checkpoint_from_file(model_conf.done_file_path)
         if ckpt_path is not None:
             print("load model from checkpoint:", ckpt_path)
             ckpt = tf.train.Checkpoint(model=model, optimizer=model.optimizer)
@@ -141,10 +141,11 @@ class Learner:
         mfout.close()
         print(datetime.datetime.now(), "metrics written to %s" % metric_path)
 
-        #导出 serving 模型
-        self.set_training_mode(False, True)
-        self.dump_serving_model(end_day, 0)
-        self.set_training_mode(True, False)
+        # 滚动评估只需要 checkpoint，可关闭 serving model 导出。
+        if dump_serving_model:
+            self.set_training_mode(False, True)
+            self.dump_serving_model(end_day, 0)
+            self.set_training_mode(True, False)
 
     def train_one_day(self, train_data, day, train_writer, mfout=None):
         model = self.model
@@ -361,6 +362,10 @@ if __name__ == "__main__":
     parse.add_argument('-data', type=str, help='input data files')
     parse.add_argument('-start_day', type=str, help='train start day')
     parse.add_argument('-end_day', type=str, help='train end day')
+    parse.add_argument('-checkpoint_path', type=str, default=None,
+                       help='explicit checkpoint directory; defaults to last entry in model.done')
+    parse.add_argument('-dump_serving_model', type=int, default=1,
+                       help='1: dump serving model after training; 0: checkpoint only')
 
     args = parse.parse_args()
     solver = Learner()
@@ -377,7 +382,9 @@ if __name__ == "__main__":
         #按天 for 循环读取数据并训练(数据读取放在 train() 内部,逐天进行)
         print('start training, day by day from %s to %s' % (args.start_day, args.end_day))
         start_time = time.time()
-        solver.train(args.data, data_path=args.data, start_day=args.start_day, end_day=args.end_day)
+        solver.train(args.data, model_path=args.checkpoint_path, data_path=args.data,
+                     start_day=args.start_day, end_day=args.end_day,
+                     dump_serving_model=bool(args.dump_serving_model))
         end_time2 = time.time()
         print('end training, using_time_training: ', end_time2 - start_time)
     else:
