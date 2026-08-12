@@ -6,6 +6,7 @@ import model_conf
 import model_conf
 from tensorflow.python.framework import sparse_tensor
 from module.rankmixer_v4 import *
+from module.rolemix import RoleMix
 from logger import logger
 from module.seq_attention import *
 
@@ -101,9 +102,42 @@ class Model(tf.keras.Model):
 
         # self.bn = tf.keras.layers.BatchNormalization(momentum=0.99,epsilon=1e-3,center=True,scale=False)
 
-        # 初始化底层主网络
-        self.rankmixer = RankMixer(t=16, token_dim=768, num_heads=16, num_experts=16, hidden_ratio=2,
-                                   training=self.training)
+        # RoleMix语义token接口与统一交互骨干
+        rolemix_reg = regularizers.l2(model_conf.l2_reg)
+        self.rolemix = RoleMix(
+            semantic_tokens=model_conf.rolemix_semantic_token_count,
+            sequence_tokens=model_conf.rolemix_sequence_token_count,
+            dim=model_conf.rolemix_token_dim,
+            num_blocks=model_conf.rolemix_num_blocks,
+            hidden_ratio=model_conf.rolemix_hidden_ratio,
+            sinkhorn_iters=model_conf.rolemix_sinkhorn_iters,
+            temperature=model_conf.rolemix_temperature,
+            name='rolemix')
+        self.rolemix_semantic_projections = [
+            tf.keras.layers.Dense(model_conf.rolemix_token_dim, kernel_regularizer=rolemix_reg,
+                                  name='rolemix_{}_projection'.format(name))
+            for name, _ in model_conf.rolemix_semantic_groups
+        ]
+        self.rolemix_semantic_norms = [
+            tf.keras.layers.LayerNormalization(axis=-1, epsilon=1e-5,
+                                               name='rolemix_{}_norm'.format(name))
+            for name, _ in model_conf.rolemix_semantic_groups
+        ]
+        self.rolemix_sequence_projections = [
+            tf.keras.layers.Dense(model_conf.rolemix_token_dim, kernel_regularizer=rolemix_reg,
+                                  name='rolemix_sequence_{}_projection'.format(i))
+            for i in range(model_conf.rolemix_sequence_token_count)
+        ]
+        self.rolemix_sequence_norms = [
+            tf.keras.layers.LayerNormalization(axis=-1, epsilon=1e-5,
+                                               name='rolemix_sequence_{}_norm'.format(i))
+            for i in range(model_conf.rolemix_sequence_token_count)
+        ]
+        self.rolemix_din_residual = tf.keras.layers.Dense(2 * model_conf.rolemix_token_dim,
+                                                          kernel_regularizer=rolemix_reg,
+                                                          name='rolemix_din_residual')
+        self.rolemix_din_gate = self.add_weight('rolemix_din_gate', shape=[],
+                                                initializer=tf.keras.initializers.Constant(0.1))
         # 初始化序列网络
         self.seq_click_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_click_seq')
         self.seq_pay_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_pay_seq')
@@ -470,14 +504,6 @@ class Model(tf.keras.Model):
         # all_emb = tf.gather(pooled_output, emb_slot_indices, axis=1)
         # all_emb = tf.reshape(all_emb, [tf.shape(all_emb)[0], -1])
 
-        # 获取user_emb
-        emb_user_indices = self.slot_id_table.lookup(tf.constant(model_conf.user_fea_list, dtype=tf.dtypes.int32))
-        emb_user = tf.gather(pooled_output[:, :, 1:], emb_user_indices, axis=1)
-        emb_user = tf.reshape(
-            emb_user,
-            [tf.shape(emb_user)[0], len(model_conf.user_fea_list) * model_conf.fm_emb_size])
-        logger.info("emb_user shape is {}".format(emb_user.shape))
-
         # 获取shop_emb
         emb_shop_indices = self.slot_id_table.lookup(tf.constant(model_conf.shop_fea_list, dtype=tf.dtypes.int32))
         emb_shop = tf.gather(pooled_output[:, :, 1:], emb_shop_indices, axis=1)
@@ -485,15 +511,6 @@ class Model(tf.keras.Model):
             emb_shop,
             [tf.shape(emb_shop)[0], len(model_conf.shop_fea_list) * model_conf.fm_emb_size])
         logger.info("emb_shop shape is {}".format(emb_shop.shape))
-
-        # 获取interact_emb
-        emb_interact_indices = self.slot_id_table.lookup(
-            tf.constant(model_conf.interact_fea_list, dtype=tf.dtypes.int32))
-        emb_interact = tf.gather(pooled_output[:, :, 1:], emb_interact_indices, axis=1)
-        emb_interact = tf.reshape(
-            emb_interact,
-            [tf.shape(emb_interact)[0], len(model_conf.interact_fea_list) * model_conf.fm_emb_size])
-        logger.info("emb_interact shape is {}".format(emb_interact.shape))
 
         # 获取sequence_emb
 
@@ -567,15 +584,32 @@ class Model(tf.keras.Model):
             self.query_seq_ln, self.query_seq_proj, self.query_seq_combine)
         seq_outputs.append(query_search_long_seq_out)
 
-        deep = tf.concat([emb_user, emb_shop, emb_interact] + seq_outputs, axis=-1)
+        rolemix_slot_indices = self.slot_id_table.lookup(
+            tf.constant(model_conf.rolemix_flat_slot_ids, dtype=tf.dtypes.int32))
+        rolemix_slot_emb = tf.gather(pooled_output[:, :, 1:], rolemix_slot_indices, axis=1)
+        semantic_tokens = []
+        group_start = 0
+        for projection, norm, (_, slot_ids) in zip(
+                self.rolemix_semantic_projections,
+                self.rolemix_semantic_norms,
+                model_conf.rolemix_semantic_groups):
+            group_end = group_start + len(slot_ids)
+            group_emb = rolemix_slot_emb[:, group_start:group_end, :]
+            group_emb = tf.reshape(group_emb,
+                                   [tf.shape(group_emb)[0], len(slot_ids) * model_conf.fm_emb_size])
+            semantic_tokens.append(norm(projection(group_emb)))
+            group_start = group_end
+        semantic_tokens = tf.stack(semantic_tokens, axis=1)
+        sequence_tokens = tf.stack([
+            norm(projection(seq_output))
+            for projection, norm, seq_output in zip(
+                self.rolemix_sequence_projections, self.rolemix_sequence_norms, seq_outputs)
+        ], axis=1)
+        rolemix_output = self.rolemix(semantic_tokens, sequence_tokens)
+        din_residual = self.rolemix_din_residual(tf.concat(seq_outputs, axis=-1))
+        rolemix_output = rolemix_output + self.rolemix_din_gate * din_residual
 
-        # 余数补dims
-        remain_dims = deep.shape[-1] % (self.rankmixer.t)
-        additional_dims = tf.zeros([tf.shape(deep)[0], self.rankmixer.t - remain_dims])
-        deep_input = tf.concat([deep, additional_dims], axis=1)
-        rankmixer_output = self.rankmixer(deep_input)
-
-        concat = tf.concat([lr, fm, rankmixer_output], axis=1)
+        concat = tf.concat([lr, fm, rolemix_output], axis=1)
 
         buy_tower_output = self.buy_tower(concat, training=self.training)
         cat_tower_output = self.cat_tower(concat, training=self.training)
@@ -600,4 +634,3 @@ class Model(tf.keras.Model):
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
         return ctcvr, cat_pred, click_pred, ext_pred
-
