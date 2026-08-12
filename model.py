@@ -109,6 +109,16 @@ class Model(tf.keras.Model):
         self.seq_pay_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_pay_seq')
         self.seq_12h_click_cate_id_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid',
                                                                          name='12h_click_cate_id_seq')
+        self.shop_seq_query_dense = tf.keras.layers.Dense(
+            model_conf.fm_emb_size,
+            activation=tf.nn.relu,
+            kernel_regularizer=regularizers.l2(model_conf.l2_reg),
+            name='shop_seq_query_dense')
+        self.category_seq_query_dense = tf.keras.layers.Dense(
+            model_conf.fm_emb_size,
+            activation=tf.nn.relu,
+            kernel_regularizer=regularizers.l2(model_conf.l2_reg),
+            name='category_seq_query_dense')
         self.attention_layer_search_long_pay = DIN_attention_Layer([50, 20], 'sigmoid', name='search_pay_seq_long')
         self.attention_layer_search_long_clk = DIN_attention_Layer([50, 20], 'sigmoid', name='search_clk_seq_long')
         self.attention_layer_search_long_query = DIN_attention_Layer([50, 20], 'sigmoid', name='search_query_seq_long')
@@ -497,13 +507,23 @@ class Model(tf.keras.Model):
 
         # 获取sequence_emb
 
-        # 获取全局点击，支付sid 序列query-->sid
-        global_query_slot_indices = self.slot_id_table.lookup(
-            tf.constant(model_conf.global_seq_query_sids, dtype=tf.dtypes.int32))
-        global_query_input = tf.gather(pooled_output[:, :, 1:], global_query_slot_indices, axis=1)
-        global_query_input = tf.reshape(
-            global_query_input,
-            [tf.shape(global_query_input)[0], len(model_conf.global_seq_query_sids) * model_conf.fm_emb_size])
+        # 点击、支付序列的key是shop ID，因此使用候选shop多语义query。
+        shop_query_slot_indices = self.slot_id_table.lookup(
+            tf.constant(model_conf.shop_seq_query_sids, dtype=tf.dtypes.int32))
+        shop_query_input = tf.gather(pooled_output[:, :, 1:], shop_query_slot_indices, axis=1)
+        shop_query_input = tf.reshape(
+            shop_query_input,
+            [tf.shape(shop_query_input)[0], len(model_conf.shop_seq_query_sids) * model_conf.fm_emb_size])
+        shop_query_input = self.shop_seq_query_dense(shop_query_input)
+
+        # 12h点击类目序列的key是类目ID，单独使用候选类目query以保持语义对齐。
+        category_query_slot_indices = self.slot_id_table.lookup(
+            tf.constant(model_conf.category_seq_query_sids, dtype=tf.dtypes.int32))
+        category_query_input = tf.gather(pooled_output[:, :, 1:], category_query_slot_indices, axis=1)
+        category_query_input = tf.reshape(
+            category_query_input,
+            [tf.shape(category_query_input)[0], len(model_conf.category_seq_query_sids) * model_conf.fm_emb_size])
+        category_query_input = self.category_seq_query_dense(category_query_input)
 
         # pooled_output_v2, slot_mask_v2 = self.process_and_pool_fused(sid_list, fid_list, table_type='din_ads_table')
         # ads_slot_indices = self.slot_id_table_din_ads.lookup(tf.constant(model_conf.ads_fea_slots, dtype=tf.dtypes.int32))
@@ -516,12 +536,12 @@ class Model(tf.keras.Model):
             seq_input = tf.gather(pooled_output[:, :, 1:], seq_slot_indices, axis=1)
             seq_mask = tf.gather(slot_mask, seq_slot_indices, axis=1)
             if seq_name == 'user_click_seq':
-                seq_output = self.seq_click_attention_layer([global_query_input, seq_input, seq_input, seq_mask])
+                seq_output = self.seq_click_attention_layer([shop_query_input, seq_input, seq_input, seq_mask])
             elif seq_name == 'user_pay_seq':
-                seq_output = self.seq_pay_attention_layer([global_query_input, seq_input, seq_input, seq_mask])
+                seq_output = self.seq_pay_attention_layer([shop_query_input, seq_input, seq_input, seq_mask])
             elif seq_name == 'user_12h_click_cateid':
                 seq_output = self.seq_12h_click_cate_id_attention_layer(
-                    [global_query_input, seq_input, seq_input, seq_mask])
+                    [category_query_input, seq_input, seq_input, seq_mask])
             seq_outputs.append(seq_output)
 
         # 搜索支付序列
@@ -600,4 +620,3 @@ class Model(tf.keras.Model):
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
         return ctcvr, cat_pred, click_pred, ext_pred
-
