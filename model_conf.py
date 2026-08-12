@@ -95,12 +95,22 @@ assert len(_rolemix_grouped_slots) == len(set(_rolemix_grouped_slots))
 assert set(_rolemix_grouped_slots) == _rolemix_expected_slots
 rolemix_flat_slot_ids = list(_rolemix_grouped_slots)
 rolemix_semantic_token_count = 16
-rolemix_sequence_token_count = 6
+rolemix_hwa_domains = [
+    ('short_click', 2, 5),
+    ('short_pay', 2, 5),
+    ('short_category', 2, 5),
+    ('search_pay', 2, 10),
+    ('search_click', 2, 10),
+    ('search_query', 2, 10),
+]
+rolemix_sequence_token_count = sum(query_count for _, query_count, _ in rolemix_hwa_domains)
 rolemix_token_dim = 256
 rolemix_num_blocks = 2
 rolemix_hidden_ratio = 2
 rolemix_sinkhorn_iters = 4
 rolemix_temperature = 1.0
+rolemix_hwa_num_heads = 4
+rolemix_hwa_num_layers = 2
 
 
 

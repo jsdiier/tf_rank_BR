@@ -7,6 +7,7 @@ import model_conf
 from tensorflow.python.framework import sparse_tensor
 from module.rankmixer_v4 import *
 from module.rolemix import RoleMix
+from module.rolemix_hwa import HierarchicalWindowAttention
 from logger import logger
 from module.seq_attention import *
 
@@ -123,15 +124,17 @@ class Model(tf.keras.Model):
                                                name='rolemix_{}_norm'.format(name))
             for name, _ in model_conf.rolemix_semantic_groups
         ]
-        self.rolemix_sequence_projections = [
-            tf.keras.layers.Dense(model_conf.rolemix_token_dim, kernel_regularizer=rolemix_reg,
-                                  name='rolemix_sequence_{}_projection'.format(i))
-            for i in range(model_conf.rolemix_sequence_token_count)
-        ]
-        self.rolemix_sequence_norms = [
-            tf.keras.layers.LayerNormalization(axis=-1, epsilon=1e-5,
-                                               name='rolemix_sequence_{}_norm'.format(i))
-            for i in range(model_conf.rolemix_sequence_token_count)
+        self.rolemix_hwa_layers = [
+            HierarchicalWindowAttention(
+                query_count=query_count,
+                semantic_count=model_conf.rolemix_semantic_token_count,
+                input_dim=None,
+                dim=model_conf.rolemix_token_dim,
+                window_size=window_size,
+                num_heads=model_conf.rolemix_hwa_num_heads,
+                num_layers=model_conf.rolemix_hwa_num_layers,
+                name='rolemix_hwa_{}'.format(name))
+            for name, query_count, window_size in model_conf.rolemix_hwa_domains
         ]
         self.rolemix_din_residual = tf.keras.layers.Dense(2 * model_conf.rolemix_token_dim,
                                                           kernel_regularizer=rolemix_reg,
@@ -528,6 +531,8 @@ class Model(tf.keras.Model):
         # ads_emb = tf.reshape(ads_emb, [tf.shape(ads_emb)[0], -1])
 
         seq_outputs = []
+        hwa_events = []
+        hwa_masks = []
         for seq_name, seq_sid_ids in model_conf.seq_slot_dict.items():
             seq_slot_indices = self.slot_id_table.lookup(tf.constant(seq_sid_ids, dtype=tf.dtypes.int32))
             seq_input = tf.gather(pooled_output[:, :, 1:], seq_slot_indices, axis=1)
@@ -540,6 +545,8 @@ class Model(tf.keras.Model):
                 seq_output = self.seq_12h_click_cate_id_attention_layer(
                     [global_query_input, seq_input, seq_input, seq_mask])
             seq_outputs.append(seq_output)
+            hwa_events.append(seq_input)
+            hwa_masks.append(seq_mask)
 
         # 搜索支付序列
         seq_slot_indices = self.slot_id_table.lookup(tf.constant(model_conf.search_long_pay_seq, dtype=tf.dtypes.int32))
@@ -552,6 +559,8 @@ class Model(tf.keras.Model):
         # search_pay_catel3_seq_mask = tf.gather(slot_mask, seq_slot_indices, axis=1)
 
         pay_search_long_seq = tf.concat([search_pay_seq_input, search_pay_catel3_seq_input], axis=-1)
+        hwa_events.append(pay_search_long_seq)
+        hwa_masks.append(search_pay_seq_mask)
         pay_search_long_seq_out = self._search_seq_encode_pool_att(
             pay_search_long_seq, search_pay_seq_mask, emb_shop,
             self.attention_layer_search_long_pay,
@@ -567,6 +576,8 @@ class Model(tf.keras.Model):
             tf.constant(model_conf.search_long_clk_catel3_seq, dtype=tf.dtypes.int32))
         search_clk_catel3_seq_input = tf.gather(pooled_output[:, :, 1:], seq_slot_indices, axis=1)
         click_search_long_seq = tf.concat([click_seq_input, search_clk_catel3_seq_input], axis=-1)
+        hwa_events.append(click_search_long_seq)
+        hwa_masks.append(click_seq_mask)
         clk_search_long_seq_out = self._search_seq_encode_pool_att(
             click_search_long_seq, click_seq_mask, emb_shop,
             self.attention_layer_search_long_clk,
@@ -583,6 +594,8 @@ class Model(tf.keras.Model):
             self.attention_layer_search_long_query,
             self.query_seq_ln, self.query_seq_proj, self.query_seq_combine)
         seq_outputs.append(query_search_long_seq_out)
+        hwa_events.append(query_seq_input)
+        hwa_masks.append(query_cate_mask)
 
         rolemix_slot_indices = self.slot_id_table.lookup(
             tf.constant(model_conf.rolemix_flat_slot_ids, dtype=tf.dtypes.int32))
@@ -600,12 +613,14 @@ class Model(tf.keras.Model):
             semantic_tokens.append(norm(projection(group_emb)))
             group_start = group_end
         semantic_tokens = tf.stack(semantic_tokens, axis=1)
-        sequence_tokens = tf.stack([
-            norm(projection(seq_output))
-            for projection, norm, seq_output in zip(
-                self.rolemix_sequence_projections, self.rolemix_sequence_norms, seq_outputs)
+        time_slot_indices = self.slot_id_table.lookup(tf.constant([39, 40, 41], dtype=tf.dtypes.int32))
+        time_context = tf.gather(pooled_output[:, :, 1:], time_slot_indices, axis=1)
+        time_context = tf.reshape(time_context, [tf.shape(time_context)[0], 3 * model_conf.fm_emb_size])
+        sequence_tokens = tf.concat([
+            hwa_layer([events, mask, semantic_tokens, time_context])
+            for hwa_layer, events, mask in zip(self.rolemix_hwa_layers, hwa_events, hwa_masks)
         ], axis=1)
-        rolemix_output = self.rolemix(semantic_tokens, sequence_tokens)
+        rolemix_output = self.rolemix([semantic_tokens, sequence_tokens])
         din_residual = self.rolemix_din_residual(tf.concat(seq_outputs, axis=-1))
         rolemix_output = rolemix_output + self.rolemix_din_gate * din_residual
 

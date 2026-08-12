@@ -91,7 +91,8 @@ class RoleMix(tf.keras.layers.Layer):
         self.global_token = self.add_weight('global_token', [1, 1, self.dim],
                                             initializer=tf.keras.initializers.RandomNormal(stddev=0.02))
 
-    def call(self, semantic_tokens, sequence_tokens):
+    def call(self, inputs):
+        semantic_tokens, sequence_tokens = inputs
         batch = tf.shape(semantic_tokens)[0]
         global_token = tf.tile(self.global_token, [batch, 1, 1])
         x = tf.concat([global_token, sequence_tokens, semantic_tokens], axis=1)
