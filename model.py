@@ -605,7 +605,7 @@ class Model(tf.keras.Model):
             for projection, norm, seq_output in zip(
                 self.rolemix_sequence_projections, self.rolemix_sequence_norms, seq_outputs)
         ], axis=1)
-        rolemix_output = self.rolemix(semantic_tokens, sequence_tokens)
+        rolemix_output = self.rolemix([semantic_tokens, sequence_tokens])
         din_residual = self.rolemix_din_residual(tf.concat(seq_outputs, axis=-1))
         rolemix_output = rolemix_output + self.rolemix_din_gate * din_residual
 
