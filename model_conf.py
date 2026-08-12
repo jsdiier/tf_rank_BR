@@ -30,8 +30,9 @@ interact_fea_list = [1046, 1047, 1048, 1049, 1050, 1051, 1052, 1053, 1054, 1055,
 
 
 
-#全局点击，支付序列候选query sid
-global_seq_query_sids=[68]
+# 全局点击、支付与12h点击类目序列的候选shop query。
+# 8个BR候选shop slot拼接后由model.py投影回fm_emb_size维。
+global_seq_query_sids = [68, 67, 75, 76, 77, 78, 902, 904]
 
 #sequence list
 user_click_seq = list(range(32841, 32861))

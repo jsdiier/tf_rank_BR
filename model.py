@@ -109,6 +109,11 @@ class Model(tf.keras.Model):
         self.seq_pay_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_pay_seq')
         self.seq_12h_click_cate_id_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid',
                                                                          name='12h_click_cate_id_seq')
+        self.global_seq_query_dense = tf.keras.layers.Dense(
+            model_conf.fm_emb_size,
+            activation=tf.nn.relu,
+            kernel_regularizer=regularizers.l2(model_conf.l2_reg),
+            name='global_seq_query_dense')
         self.attention_layer_search_long_pay = DIN_attention_Layer([50, 20], 'sigmoid', name='search_pay_seq_long')
         self.attention_layer_search_long_clk = DIN_attention_Layer([50, 20], 'sigmoid', name='search_clk_seq_long')
         self.attention_layer_search_long_query = DIN_attention_Layer([50, 20], 'sigmoid', name='search_query_seq_long')
@@ -504,6 +509,7 @@ class Model(tf.keras.Model):
         global_query_input = tf.reshape(
             global_query_input,
             [tf.shape(global_query_input)[0], len(model_conf.global_seq_query_sids) * model_conf.fm_emb_size])
+        global_query_input = self.global_seq_query_dense(global_query_input)
 
         # pooled_output_v2, slot_mask_v2 = self.process_and_pool_fused(sid_list, fid_list, table_type='din_ads_table')
         # ads_slot_indices = self.slot_id_table_din_ads.lookup(tf.constant(model_conf.ads_fea_slots, dtype=tf.dtypes.int32))
@@ -600,4 +606,3 @@ class Model(tf.keras.Model):
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
         return ctcvr, cat_pred, click_pred, ext_pred
-
