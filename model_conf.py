@@ -62,6 +62,10 @@ eval_uid_ratio = 0.2
 # 离线推理性能测试：先预热，再统计固定数量的完整batch。
 inference_benchmark_warmup_batches = 20
 inference_benchmark_measure_batches = 100
+
+# buy batch级全局pairwise排序约束。
+buy_pairwise_loss_weight = 0.02
+buy_pairwise_max_pairs = 4096
 #每条样本的 add_infos 字段个数
 add_info_field_num = 24
 #uid 在每条样本 add_infos 中的下标

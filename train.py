@@ -31,7 +31,23 @@ class Learner:
             loss_click = model.loss_bc(tf.expand_dims(feat['clk_label'], 1), pred_click)
             loss_ext = model.loss_bc(tf.expand_dims(feat['ext_label'], 1), pred_ext)
 
-            final_loss = loss_buy * buy_weight + loss_cat * cat_weight + loss_click * click_weight + loss_ext * ext_weight
+            buy_labels = tf.reshape(feat['cvr_label'], [-1])
+            buy_probs = tf.clip_by_value(tf.reshape(pred_buy, [-1]), 1e-6, 1.0 - 1e-6)
+            buy_logits = tf.math.log(buy_probs) - tf.math.log1p(-buy_probs)
+            positive_scores = tf.random.shuffle(tf.boolean_mask(buy_logits, buy_labels > 0.5))
+            negative_scores = tf.random.shuffle(tf.boolean_mask(buy_logits, buy_labels <= 0.5))
+            pair_count = tf.minimum(
+                tf.minimum(tf.size(positive_scores), tf.size(negative_scores)),
+                tf.constant(model_conf.buy_pairwise_max_pairs, dtype=tf.int32))
+            pairwise_loss = tf.cond(
+                pair_count > 0,
+                lambda: tf.reduce_mean(tf.nn.softplus(
+                    -(positive_scores[:pair_count] - negative_scores[:pair_count]))),
+                lambda: tf.constant(0.0, dtype=pred_buy.dtype))
+
+            final_loss = (loss_buy * buy_weight + loss_cat * cat_weight +
+                          loss_click * click_weight + loss_ext * ext_weight +
+                          model_conf.buy_pairwise_loss_weight * pairwise_loss)
 
             gradients = tape.gradient(final_loss, model.trainable_weights)
         model.optimizer.apply_gradients(zip(gradients, model.trainable_weights))
