@@ -112,6 +112,18 @@ class Model(tf.keras.Model):
         self.attention_layer_search_long_pay = DIN_attention_Layer([50, 20], 'sigmoid', name='search_pay_seq_long')
         self.attention_layer_search_long_clk = DIN_attention_Layer([50, 20], 'sigmoid', name='search_clk_seq_long')
         self.attention_layer_search_long_query = DIN_attention_Layer([50, 20], 'sigmoid', name='search_query_seq_long')
+        self.brand_affinity_attention_layer = DIN_attention_Layer(
+            [50, 20], 'sigmoid', name='brand_affinity_seq')
+        self.shop_score_period_attention_layer = DIN_attention_Layer(
+            [50, 20], 'sigmoid', name='shop_score_period_seq')
+        self.his_recency_proj = tf.keras.layers.Dense(
+            32, activation=tf.nn.swish,
+            kernel_regularizer=regularizers.l2(model_conf.l2_reg),
+            name='his_recency_proj')
+        self.lhuc_gate = tf.keras.Sequential([
+            tf.keras.layers.Dense(128, activation=tf.nn.relu, name='lhuc_gate_hidden'),
+            tf.keras.layers.Dense(768, activation='sigmoid', name='lhuc_gate_out'),
+        ], name='lhuc_gate')
 
         # 搜索长序列：先融合多路 embedding，再与 DIN 注意力 + 均值池化残差组合，减轻「高维 concat 噪声」
         seq_token_dim = 32
@@ -567,6 +579,51 @@ class Model(tf.keras.Model):
             self.query_seq_ln, self.query_seq_proj, self.query_seq_combine)
         seq_outputs.append(query_search_long_seq_out)
 
+        # 候选品牌感知的48项up_s_brand统计维度注意力。
+        brand_pref_slot_ids = list(range(1421, 1469))
+        brand_pref_indices = self.slot_id_table.lookup(
+            tf.constant(brand_pref_slot_ids, dtype=tf.dtypes.int32))
+        brand_pref_seq = tf.gather(pooled_output[:, :, 1:], brand_pref_indices, axis=1)
+        brand_pref_mask = tf.gather(slot_mask, brand_pref_indices, axis=1)
+        shop_brand_query_indices = self.slot_id_table.lookup(
+            tf.constant([67], dtype=tf.dtypes.int32))
+        shop_brand_query = tf.reshape(
+            tf.gather(pooled_output[:, :, 1:], shop_brand_query_indices, axis=1),
+            [tf.shape(pooled_output)[0], model_conf.fm_emb_size])
+        brand_affinity_out = self.brand_affinity_attention_layer(
+            [shop_brand_query, brand_pref_seq, brand_pref_seq, brand_pref_mask])
+        seq_outputs.append(brand_affinity_out)
+
+        # 候选店铺是否命中最近三单历史店铺 × 离散复购间隔。
+        his_matched_slot_ids = [94, 98, 102]
+        his_gap_slot_ids = [96, 100, 104]
+        his_matched_indices = self.slot_id_table.lookup(
+            tf.constant(his_matched_slot_ids, dtype=tf.dtypes.int32))
+        his_gap_indices = self.slot_id_table.lookup(
+            tf.constant(his_gap_slot_ids, dtype=tf.dtypes.int32))
+        his_matched_emb = tf.gather(pooled_output[:, :, 1:], his_matched_indices, axis=1)
+        his_gap_emb = tf.gather(pooled_output[:, :, 1:], his_gap_indices, axis=1)
+        his_recency_cross = tf.reshape(
+            his_matched_emb * his_gap_emb,
+            [tf.shape(his_matched_emb)[0], len(his_matched_slot_ids) * model_conf.fm_emb_size])
+        seq_outputs.append(self.his_recency_proj(his_recency_cross))
+
+        # 当前请求时段感知的7项分时段店铺偏好统计注意力。
+        shop_score_period_slot_ids = [1160, 1161, 1162, 1163, 1164, 1165, 1166]
+        shop_score_period_indices = self.slot_id_table.lookup(
+            tf.constant(shop_score_period_slot_ids, dtype=tf.dtypes.int32))
+        shop_score_period_seq = tf.gather(
+            pooled_output[:, :, 1:], shop_score_period_indices, axis=1)
+        shop_score_period_mask = tf.gather(slot_mask, shop_score_period_indices, axis=1)
+        period_query_indices = self.slot_id_table.lookup(
+            tf.constant([40], dtype=tf.dtypes.int32))
+        period_query = tf.reshape(
+            tf.gather(pooled_output[:, :, 1:], period_query_indices, axis=1),
+            [tf.shape(pooled_output)[0], model_conf.fm_emb_size])
+        shop_score_period_out = self.shop_score_period_attention_layer(
+            [period_query, shop_score_period_seq, shop_score_period_seq, shop_score_period_mask])
+        seq_outputs.append(shop_score_period_out)
+
         deep = tf.concat([emb_user, emb_shop, emb_interact] + seq_outputs, axis=-1)
 
         # 余数补dims
@@ -575,12 +632,18 @@ class Model(tf.keras.Model):
         deep_input = tf.concat([deep, additional_dims], axis=1)
         rankmixer_output = self.rankmixer(deep_input)
 
+        # 用户侧LHUC个性化门控。
+        rankmixer_output = rankmixer_output * (2.0 * self.lhuc_gate(emb_user))
+
         concat = tf.concat([lr, fm, rankmixer_output], axis=1)
 
-        buy_tower_output = self.buy_tower(concat, training=self.training)
         cat_tower_output = self.cat_tower(concat, training=self.training)
         click_tower_output = self.click_tower(concat, training=self.training)
         ext_tower_output = self.ext_tower(concat, training=self.training)
+        buy_tower_input = tf.concat(
+            [concat, tf.stop_gradient(cat_tower_output), tf.stop_gradient(click_tower_output)],
+            axis=1)
+        buy_tower_output = self.buy_tower(buy_tower_input, training=self.training)
 
         cvr_pred_org = self.dense_concat(buy_tower_output)
         cat_pred_org = self.dense_concat1(cat_tower_output)
@@ -600,4 +663,3 @@ class Model(tf.keras.Model):
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
         return ctcvr, cat_pred, click_pred, ext_pred
-
