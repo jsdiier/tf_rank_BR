@@ -113,6 +113,28 @@ class Model(tf.keras.Model):
             num_heads=model_conf.onetrans_num_heads,
             ffn_dim=model_conf.onetrans_ffn_dim,
             name='onetrans_lite')
+        self.seq_click_attention_layer = DIN_attention_Layer(
+            [50, 20], 'sigmoid', name='semantic_click_seq')
+        self.seq_pay_attention_layer = DIN_attention_Layer(
+            [50, 20], 'sigmoid', name='semantic_pay_seq')
+        self.seq_12h_click_cate_id_attention_layer = DIN_attention_Layer(
+            [50, 20], 'sigmoid', name='semantic_12h_category_seq')
+        self.shop_seq_query_dense = tf.keras.layers.Dense(
+            model_conf.fm_emb_size,
+            activation=tf.nn.relu,
+            kernel_regularizer=regularizers.l2(model_conf.l2_reg),
+            name='shop_seq_query_dense')
+        self.category_seq_query_dense = tf.keras.layers.Dense(
+            model_conf.fm_emb_size,
+            activation=tf.nn.relu,
+            kernel_regularizer=regularizers.l2(model_conf.l2_reg),
+            name='category_seq_query_dense')
+        self.semantic_din_projection = tf.keras.layers.Dense(
+            model_conf.onetrans_token_dim,
+            name='semantic_din_projection')
+        self.semantic_din_gate = self.add_weight(
+            name='semantic_din_gate', shape=[],
+            initializer=tf.keras.initializers.Constant(0.1))
         # 初始化4个任务塔
         self.buy_tower = tf.keras.Sequential()
         for i, l in enumerate([256]):
@@ -489,6 +511,37 @@ class Model(tf.keras.Model):
             sequence_masks,
             ordinary_embeddings,
             training=self.training)
+
+        shop_query_indices = self.slot_id_table.lookup(
+            tf.constant(model_conf.shop_seq_query_sids, dtype=tf.int32))
+        shop_query = tf.gather(
+            pooled_output[:, :, 1:], shop_query_indices, axis=1)
+        shop_query = tf.reshape(
+            shop_query,
+            [tf.shape(shop_query)[0],
+             len(model_conf.shop_seq_query_sids) * model_conf.fm_emb_size])
+        shop_query = self.shop_seq_query_dense(shop_query)
+
+        category_query_indices = self.slot_id_table.lookup(
+            tf.constant(model_conf.category_seq_query_sids, dtype=tf.int32))
+        category_query = tf.gather(
+            pooled_output[:, :, 1:], category_query_indices, axis=1)
+        category_query = tf.reshape(
+            category_query,
+            [tf.shape(category_query)[0],
+             len(model_conf.category_seq_query_sids) * model_conf.fm_emb_size])
+        category_query = self.category_seq_query_dense(category_query)
+
+        semantic_click = self.seq_click_attention_layer(
+            [shop_query, click_events, click_events, click_mask])
+        semantic_pay = self.seq_pay_attention_layer(
+            [shop_query, pay_events, pay_events, pay_mask])
+        semantic_category = self.seq_12h_click_cate_id_attention_layer(
+            [category_query, category_events, category_events, category_mask])
+        semantic_residual = self.semantic_din_projection(
+            tf.concat([semantic_click, semantic_pay, semantic_category], axis=-1))
+        onetrans_output = (
+            onetrans_output + self.semantic_din_gate * semantic_residual)
 
         concat = tf.concat([lr, fm, onetrans_output], axis=1)
 

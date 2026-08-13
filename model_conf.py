@@ -71,6 +71,10 @@ onetrans_num_heads = 4
 onetrans_ffn_dim = 256
 onetrans_flat_slot_ids = list(dict.fromkeys(user_fea_list + shop_fea_list + interact_fea_list))
 assert len(onetrans_flat_slot_ids) == 758
+
+# Semantic DIN residual queries.
+shop_seq_query_sids = [68, 67, 75, 76, 77, 78, 902, 904]
+category_seq_query_sids = [77, 78, 79, 902, 904]
 #每条样本的 add_infos 字段个数
 add_info_field_num = 24
 #uid 在每条样本 add_infos 中的下标
