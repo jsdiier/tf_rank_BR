@@ -62,6 +62,15 @@ eval_uid_ratio = 0.2
 # 离线推理性能测试：先预热，再统计固定数量的完整batch。
 inference_benchmark_warmup_batches = 20
 inference_benchmark_measure_batches = 100
+
+# OneTrans-lite: unified event sequence and non-sequential feature interaction.
+onetrans_token_dim = 128
+onetrans_non_sequence_token_count = 16
+onetrans_num_layers = 2
+onetrans_num_heads = 4
+onetrans_ffn_dim = 256
+onetrans_flat_slot_ids = list(dict.fromkeys(user_fea_list + shop_fea_list + interact_fea_list))
+assert len(onetrans_flat_slot_ids) == 758
 #每条样本的 add_infos 字段个数
 add_info_field_num = 24
 #uid 在每条样本 add_infos 中的下标

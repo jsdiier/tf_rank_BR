@@ -6,6 +6,7 @@ import model_conf
 import model_conf
 from tensorflow.python.framework import sparse_tensor
 from module.rankmixer_v4 import *
+from module.onetrans_lite import OneTransLite
 from logger import logger
 from module.seq_attention import *
 
@@ -101,34 +102,17 @@ class Model(tf.keras.Model):
 
         # self.bn = tf.keras.layers.BatchNormalization(momentum=0.99,epsilon=1e-3,center=True,scale=False)
 
-        # 初始化底层主网络
-        self.rankmixer = RankMixer(t=16, token_dim=768, num_heads=16, num_experts=16, hidden_ratio=2,
-                                   training=self.training)
-        # 初始化序列网络
-        self.seq_click_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_click_seq')
-        self.seq_pay_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_pay_seq')
-        self.seq_12h_click_cate_id_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid',
-                                                                         name='12h_click_cate_id_seq')
-        self.attention_layer_search_long_pay = DIN_attention_Layer([50, 20], 'sigmoid', name='search_pay_seq_long')
-        self.attention_layer_search_long_clk = DIN_attention_Layer([50, 20], 'sigmoid', name='search_clk_seq_long')
-        self.attention_layer_search_long_query = DIN_attention_Layer([50, 20], 'sigmoid', name='search_query_seq_long')
-
-        # 搜索长序列：先融合多路 embedding，再与 DIN 注意力 + 均值池化残差组合，减轻「高维 concat 噪声」
-        seq_token_dim = 32
-        self.search_seq_token_dim = seq_token_dim
-        seq_reg = regularizers.l2(model_conf.l2_reg)
-        self.pay_seq_ln = tf.keras.layers.LayerNormalization(axis=-1, epsilon=1e-5)
-        self.pay_seq_proj = tf.keras.layers.Dense(seq_token_dim, activation=tf.nn.swish, kernel_regularizer=seq_reg)
-        self.pay_seq_combine = tf.keras.layers.Dense(seq_token_dim, activation=tf.nn.swish, kernel_regularizer=seq_reg)
-        self.clk_seq_ln = tf.keras.layers.LayerNormalization(axis=-1, epsilon=1e-5)
-        self.clk_seq_proj = tf.keras.layers.Dense(seq_token_dim, activation=tf.nn.swish, kernel_regularizer=seq_reg)
-        self.clk_seq_combine = tf.keras.layers.Dense(seq_token_dim, activation=tf.nn.swish, kernel_regularizer=seq_reg)
-        self.query_seq_ln = tf.keras.layers.LayerNormalization(axis=-1, epsilon=1e-5)
-        self.query_seq_proj = tf.keras.layers.Dense(seq_token_dim, activation=tf.nn.swish, kernel_regularizer=seq_reg)
-        self.query_seq_combine = tf.keras.layers.Dense(seq_token_dim, activation=tf.nn.swish,
-                                                       kernel_regularizer=seq_reg)
-        self.search_seq_dropout = tf.keras.layers.Dropout(0.1)
-
+        # OneTrans-lite unifies the six event sequences and ordinary feature interaction.
+        self.onetrans_lite = OneTransLite(
+            sequence_input_dims=[8, 8, 8, 16, 16, 8],
+            non_sequence_slot_count=len(model_conf.onetrans_flat_slot_ids),
+            embedding_dim=model_conf.fm_emb_size,
+            token_dim=model_conf.onetrans_token_dim,
+            non_sequence_token_count=model_conf.onetrans_non_sequence_token_count,
+            num_layers=model_conf.onetrans_num_layers,
+            num_heads=model_conf.onetrans_num_heads,
+            ffn_dim=model_conf.onetrans_ffn_dim,
+            name='onetrans_lite')
         # 初始化4个任务塔
         self.buy_tower = tf.keras.Sequential()
         for i, l in enumerate([256]):
@@ -470,112 +454,43 @@ class Model(tf.keras.Model):
         # all_emb = tf.gather(pooled_output, emb_slot_indices, axis=1)
         # all_emb = tf.reshape(all_emb, [tf.shape(all_emb)[0], -1])
 
-        # 获取user_emb
-        emb_user_indices = self.slot_id_table.lookup(tf.constant(model_conf.user_fea_list, dtype=tf.dtypes.int32))
-        emb_user = tf.gather(pooled_output[:, :, 1:], emb_user_indices, axis=1)
-        emb_user = tf.reshape(
-            emb_user,
-            [tf.shape(emb_user)[0], len(model_conf.user_fea_list) * model_conf.fm_emb_size])
-        logger.info("emb_user shape is {}".format(emb_user.shape))
+        def gather_sequence(slot_ids):
+            indices = self.slot_id_table.lookup(tf.constant(slot_ids, dtype=tf.int32))
+            return (tf.gather(pooled_output[:, :, 1:], indices, axis=1),
+                    tf.gather(slot_mask, indices, axis=1))
 
-        # 获取shop_emb
-        emb_shop_indices = self.slot_id_table.lookup(tf.constant(model_conf.shop_fea_list, dtype=tf.dtypes.int32))
-        emb_shop = tf.gather(pooled_output[:, :, 1:], emb_shop_indices, axis=1)
-        emb_shop = tf.reshape(
-            emb_shop,
-            [tf.shape(emb_shop)[0], len(model_conf.shop_fea_list) * model_conf.fm_emb_size])
-        logger.info("emb_shop shape is {}".format(emb_shop.shape))
+        click_events, click_mask = gather_sequence(model_conf.user_click_seq)
+        pay_events, pay_mask = gather_sequence(model_conf.user_pay_seq)
+        category_events, category_mask = gather_sequence(model_conf.u_12h_click_cateIds)
+        search_pay_shop, search_pay_mask = gather_sequence(model_conf.search_long_pay_seq)
+        search_pay_category, _ = gather_sequence(model_conf.search_long_pay_catel3_seq)
+        search_click_shop, search_click_mask = gather_sequence(model_conf.search_long_clk_seq)
+        search_click_category, _ = gather_sequence(model_conf.search_long_clk_catel3_seq)
+        search_query_events, search_query_mask = gather_sequence(model_conf.search_long_query_catel3_seq)
 
-        # 获取interact_emb
-        emb_interact_indices = self.slot_id_table.lookup(
-            tf.constant(model_conf.interact_fea_list, dtype=tf.dtypes.int32))
-        emb_interact = tf.gather(pooled_output[:, :, 1:], emb_interact_indices, axis=1)
-        emb_interact = tf.reshape(
-            emb_interact,
-            [tf.shape(emb_interact)[0], len(model_conf.interact_fea_list) * model_conf.fm_emb_size])
-        logger.info("emb_interact shape is {}".format(emb_interact.shape))
+        sequence_inputs = [
+            click_events,
+            pay_events,
+            category_events,
+            tf.concat([search_pay_shop, search_pay_category], axis=-1),
+            tf.concat([search_click_shop, search_click_category], axis=-1),
+            search_query_events,
+        ]
+        sequence_masks = [
+            click_mask, pay_mask, category_mask, search_pay_mask,
+            search_click_mask, search_query_mask,
+        ]
+        ordinary_indices = self.slot_id_table.lookup(
+            tf.constant(model_conf.onetrans_flat_slot_ids, dtype=tf.int32))
+        ordinary_embeddings = tf.gather(
+            pooled_output[:, :, 1:], ordinary_indices, axis=1)
+        onetrans_output = self.onetrans_lite(
+            sequence_inputs,
+            sequence_masks,
+            ordinary_embeddings,
+            training=self.training)
 
-        # 获取sequence_emb
-
-        # 获取全局点击，支付sid 序列query-->sid
-        global_query_slot_indices = self.slot_id_table.lookup(
-            tf.constant(model_conf.global_seq_query_sids, dtype=tf.dtypes.int32))
-        global_query_input = tf.gather(pooled_output[:, :, 1:], global_query_slot_indices, axis=1)
-        global_query_input = tf.reshape(
-            global_query_input,
-            [tf.shape(global_query_input)[0], len(model_conf.global_seq_query_sids) * model_conf.fm_emb_size])
-
-        # pooled_output_v2, slot_mask_v2 = self.process_and_pool_fused(sid_list, fid_list, table_type='din_ads_table')
-        # ads_slot_indices = self.slot_id_table_din_ads.lookup(tf.constant(model_conf.ads_fea_slots, dtype=tf.dtypes.int32))
-        # ads_emb = tf.gather(pooled_output_v2, ads_slot_indices, axis=1)
-        # ads_emb = tf.reshape(ads_emb, [tf.shape(ads_emb)[0], -1])
-
-        seq_outputs = []
-        for seq_name, seq_sid_ids in model_conf.seq_slot_dict.items():
-            seq_slot_indices = self.slot_id_table.lookup(tf.constant(seq_sid_ids, dtype=tf.dtypes.int32))
-            seq_input = tf.gather(pooled_output[:, :, 1:], seq_slot_indices, axis=1)
-            seq_mask = tf.gather(slot_mask, seq_slot_indices, axis=1)
-            if seq_name == 'user_click_seq':
-                seq_output = self.seq_click_attention_layer([global_query_input, seq_input, seq_input, seq_mask])
-            elif seq_name == 'user_pay_seq':
-                seq_output = self.seq_pay_attention_layer([global_query_input, seq_input, seq_input, seq_mask])
-            elif seq_name == 'user_12h_click_cateid':
-                seq_output = self.seq_12h_click_cate_id_attention_layer(
-                    [global_query_input, seq_input, seq_input, seq_mask])
-            seq_outputs.append(seq_output)
-
-        # 搜索支付序列
-        seq_slot_indices = self.slot_id_table.lookup(tf.constant(model_conf.search_long_pay_seq, dtype=tf.dtypes.int32))
-        search_pay_seq_input = tf.gather(pooled_output[:, :, 1:], seq_slot_indices, axis=1)
-        search_pay_seq_mask = tf.gather(slot_mask, seq_slot_indices, axis=1)
-
-        seq_slot_indices = self.slot_id_table.lookup(
-            tf.constant(model_conf.search_long_pay_catel3_seq, dtype=tf.dtypes.int32))
-        search_pay_catel3_seq_input = tf.gather(pooled_output[:, :, 1:], seq_slot_indices, axis=1)
-        # search_pay_catel3_seq_mask = tf.gather(slot_mask, seq_slot_indices, axis=1)
-
-        pay_search_long_seq = tf.concat([search_pay_seq_input, search_pay_catel3_seq_input], axis=-1)
-        pay_search_long_seq_out = self._search_seq_encode_pool_att(
-            pay_search_long_seq, search_pay_seq_mask, emb_shop,
-            self.attention_layer_search_long_pay,
-            self.pay_seq_ln, self.pay_seq_proj, self.pay_seq_combine)
-        seq_outputs.append(pay_search_long_seq_out)
-
-        # 搜索点击序列
-        seq_slot_indices = self.slot_id_table.lookup(tf.constant(model_conf.search_long_clk_seq, dtype=tf.dtypes.int32))
-        click_seq_input = tf.gather(pooled_output[:, :, 1:], seq_slot_indices, axis=1)
-        click_seq_mask = tf.gather(slot_mask, seq_slot_indices, axis=1)
-
-        seq_slot_indices = self.slot_id_table.lookup(
-            tf.constant(model_conf.search_long_clk_catel3_seq, dtype=tf.dtypes.int32))
-        search_clk_catel3_seq_input = tf.gather(pooled_output[:, :, 1:], seq_slot_indices, axis=1)
-        click_search_long_seq = tf.concat([click_seq_input, search_clk_catel3_seq_input], axis=-1)
-        clk_search_long_seq_out = self._search_seq_encode_pool_att(
-            click_search_long_seq, click_seq_mask, emb_shop,
-            self.attention_layer_search_long_clk,
-            self.clk_seq_ln, self.clk_seq_proj, self.clk_seq_combine)
-        seq_outputs.append(clk_search_long_seq_out)
-
-        # 搜索query序列
-        seq_slot_indices = self.slot_id_table.lookup(
-            tf.constant(model_conf.search_long_query_catel3_seq, dtype=tf.dtypes.int32))
-        query_seq_input = tf.gather(pooled_output[:, :, 1:], seq_slot_indices, axis=1)
-        query_cate_mask = tf.gather(slot_mask, seq_slot_indices, axis=1)
-        query_search_long_seq_out = self._search_seq_encode_pool_att(
-            query_seq_input, query_cate_mask, emb_shop,
-            self.attention_layer_search_long_query,
-            self.query_seq_ln, self.query_seq_proj, self.query_seq_combine)
-        seq_outputs.append(query_search_long_seq_out)
-
-        deep = tf.concat([emb_user, emb_shop, emb_interact] + seq_outputs, axis=-1)
-
-        # 余数补dims
-        remain_dims = deep.shape[-1] % (self.rankmixer.t)
-        additional_dims = tf.zeros([tf.shape(deep)[0], self.rankmixer.t - remain_dims])
-        deep_input = tf.concat([deep, additional_dims], axis=1)
-        rankmixer_output = self.rankmixer(deep_input)
-
-        concat = tf.concat([lr, fm, rankmixer_output], axis=1)
+        concat = tf.concat([lr, fm, onetrans_output], axis=1)
 
         buy_tower_output = self.buy_tower(concat, training=self.training)
         cat_tower_output = self.cat_tower(concat, training=self.training)
@@ -600,4 +515,3 @@ class Model(tf.keras.Model):
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
         return ctcvr, cat_pred, click_pred, ext_pred
-
