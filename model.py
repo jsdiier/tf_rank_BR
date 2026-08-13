@@ -6,6 +6,7 @@ import model_conf
 import model_conf
 from tensorflow.python.framework import sparse_tensor
 from module.rankmixer_v4 import *
+from module.dcn_v2 import DCNV2
 from logger import logger
 from module.seq_attention import *
 
@@ -104,6 +105,13 @@ class Model(tf.keras.Model):
         # 初始化底层主网络
         self.rankmixer = RankMixer(t=16, token_dim=768, num_heads=16, num_experts=16, hidden_ratio=2,
                                    training=self.training)
+        self.dcn_v2 = DCNV2(
+            input_dim=model_conf.dcn_v2_input_dim,
+            num_layers=model_conf.dcn_v2_num_layers,
+            low_rank=model_conf.dcn_v2_low_rank,
+            num_experts=model_conf.dcn_v2_num_experts,
+            l2_reg=model_conf.l2_reg,
+            name='dcn_v2')
         # 初始化序列网络
         self.seq_click_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_click_seq')
         self.seq_pay_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_pay_seq')
@@ -576,6 +584,7 @@ class Model(tf.keras.Model):
         rankmixer_output = self.rankmixer(deep_input)
 
         concat = tf.concat([lr, fm, rankmixer_output], axis=1)
+        concat = self.dcn_v2(concat)
 
         buy_tower_output = self.buy_tower(concat, training=self.training)
         cat_tower_output = self.cat_tower(concat, training=self.training)
@@ -600,4 +609,3 @@ class Model(tf.keras.Model):
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
         return ctcvr, cat_pred, click_pred, ext_pred
-

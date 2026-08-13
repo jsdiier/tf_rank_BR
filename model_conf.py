@@ -62,6 +62,12 @@ eval_uid_ratio = 0.2
 # 离线推理性能测试：先预热，再统计固定数量的完整batch。
 inference_benchmark_warmup_batches = 20
 inference_benchmark_measure_batches = 100
+
+# DCN-V2 CrossNet-Mix：作用在concat([lr, fm, rankmixer_output])之后。
+dcn_v2_input_dim = lr_emb_size + fm_emb_size + 768
+dcn_v2_num_layers = 2
+dcn_v2_low_rank = 32
+dcn_v2_num_experts = 4
 #每条样本的 add_infos 字段个数
 add_info_field_num = 24
 #uid 在每条样本 add_infos 中的下标
