@@ -40,7 +40,6 @@ class HierarchicalWindowAttention(tf.keras.layers.Layer):
         self.global_attentions = [tf.keras.layers.MultiHeadAttention(num_heads, dim // num_heads)
                                   for _ in range(num_layers)]
         self.query_norms = [tf.keras.layers.LayerNormalization(epsilon=1e-5) for _ in range(num_layers)]
-        self.window_norms = [tf.keras.layers.LayerNormalization(epsilon=1e-5) for _ in range(num_layers)]
 
     def _windowize(self, events, mask):
         batch = tf.shape(events)[0]
@@ -57,8 +56,8 @@ class HierarchicalWindowAttention(tf.keras.layers.Layer):
         events = self.event_projection(events)
         queries = self.query_initializer([semantic_tokens, time_context])
         states = []
-        for local_attention, global_attention, query_norm, window_norm in zip(
-                self.local_attentions, self.global_attentions, self.query_norms, self.window_norms):
+        for local_attention, global_attention, query_norm in zip(
+                self.local_attentions, self.global_attentions, self.query_norms):
             windows, window_mask = self._windowize(events, mask)
             batch = tf.shape(windows)[0]
             num_windows = tf.shape(windows)[1]
@@ -74,5 +73,4 @@ class HierarchicalWindowAttention(tf.keras.layers.Layer):
             delta = global_attention(queries, representatives, attention_mask=valid_windows[:, None, :])
             queries = query_norm(queries + delta)
             states.append(queries)
-            events = window_norm(events)
         return tf.add_n(states) / float(len(states))

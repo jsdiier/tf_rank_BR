@@ -42,17 +42,18 @@ class Learner:
         #ckpt_path="model/checkpoints/20260430_0/"
         if ckpt_path is not None:
             print("load model from checkpoint:", ckpt_path)
-            ckpt = tf.train.Checkpoint(model=model, optimizer=model.optimizer)
+            # Offline evaluation only needs model weights. Restoring optimizer
+            # slots here can create stricter requirements than training did for
+            # variables that never received a gradient.
+            ckpt = tf.train.Checkpoint(model=model)
 
             first_batch = next(iter(train_data))
             _ = model([first_batch['fea_ids'], first_batch['fea_vals']])
 
-            dummy_grad = [tf.zeros_like(v) for v in model.trainable_variables]
-            model.optimizer.apply_gradients(zip(dummy_grad, model.trainable_variables))
-
-            #ckpt.restore(tf.train.latest_checkpoint(ckpt_path)).expect_partial()
-            ckpt.restore(tf.train.latest_checkpoint(ckpt_path)).assert_consumed()
-            print("Restored optimizer step: ", model.optimizer.iterations.numpy())
+            status = ckpt.restore(tf.train.latest_checkpoint(ckpt_path))
+            # Require every current model variable to be restored while allowing
+            # optimizer state and removed unused variables to remain in an old ckpt.
+            status.expect_partial().assert_existing_objects_matched()
             print("load checkpoint path: ", ckpt_path)
 
         buy_weight = 1.0

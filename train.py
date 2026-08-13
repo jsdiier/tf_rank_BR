@@ -92,7 +92,11 @@ class Learner:
             dummy_grad = [tf.zeros_like(v) for v in model.trainable_variables]
             model.optimizer.apply_gradients(zip(dummy_grad, model.trainable_variables))
 
-            ckpt.restore(tf.train.latest_checkpoint(ckpt_path)).assert_consumed()
+            status = ckpt.restore(tf.train.latest_checkpoint(ckpt_path))
+            # Old HWA checkpoints contain variables from an unused window_norm.
+            # All variables in the current model/optimizer must match; obsolete
+            # checkpoint-only objects are intentionally allowed.
+            status.expect_partial().assert_existing_objects_matched()
             print("Restored optimizer step: ", model.optimizer.iterations.numpy())
             print("load checkpoint path: ", ckpt_path)
 
