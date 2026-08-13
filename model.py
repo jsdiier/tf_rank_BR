@@ -112,6 +112,21 @@ class Model(tf.keras.Model):
         self.attention_layer_search_long_pay = DIN_attention_Layer([50, 20], 'sigmoid', name='search_pay_seq_long')
         self.attention_layer_search_long_clk = DIN_attention_Layer([50, 20], 'sigmoid', name='search_clk_seq_long')
         self.attention_layer_search_long_query = DIN_attention_Layer([50, 20], 'sigmoid', name='search_query_seq_long')
+        self.repeat_purchase_encoder = tf.keras.Sequential([
+            tf.keras.layers.Dense(
+                32, activation=tf.nn.swish,
+                kernel_regularizer=regularizers.l2(model_conf.l2_reg),
+                name='repeat_purchase_hidden'),
+            tf.keras.layers.Dense(
+                32, activation=tf.nn.swish,
+                kernel_regularizer=regularizers.l2(model_conf.l2_reg),
+                name='repeat_purchase_output'),
+        ], name='repeat_purchase_encoder')
+        self.repeat_purchase_position_logits = self.add_weight(
+            'repeat_purchase_position_logits', shape=[3], initializer='zeros')
+        self.repeat_purchase_gate = self.add_weight(
+            'repeat_purchase_gate', shape=[],
+            initializer=tf.keras.initializers.Constant(0.01))
 
         # 搜索长序列：先融合多路 embedding，再与 DIN 注意力 + 均值池化残差组合，减轻「高维 concat 噪声」
         seq_token_dim = 32
@@ -567,6 +582,20 @@ class Model(tf.keras.Model):
             self.query_seq_ln, self.query_seq_proj, self.query_seq_combine)
         seq_outputs.append(query_search_long_seq_out)
 
+        # 最近三单的候选店铺命中状态与离散复购间隔联合编码。
+        matched_indices = self.slot_id_table.lookup(
+            tf.constant([94, 98, 102], dtype=tf.dtypes.int32))
+        gap_indices = self.slot_id_table.lookup(
+            tf.constant([96, 100, 104], dtype=tf.dtypes.int32))
+        matched_emb = tf.gather(pooled_output[:, :, 1:], matched_indices, axis=1)
+        gap_emb = tf.gather(pooled_output[:, :, 1:], gap_indices, axis=1)
+        repeat_purchase_inputs = tf.concat([matched_emb, gap_emb], axis=-1)
+        repeat_purchase_states = self.repeat_purchase_encoder(repeat_purchase_inputs)
+        position_weights = tf.nn.softmax(self.repeat_purchase_position_logits)
+        repeat_purchase_out = tf.reduce_sum(
+            repeat_purchase_states * position_weights[None, :, None], axis=1)
+        seq_outputs.append(self.repeat_purchase_gate * repeat_purchase_out)
+
         deep = tf.concat([emb_user, emb_shop, emb_interact] + seq_outputs, axis=-1)
 
         # 余数补dims
@@ -600,4 +629,3 @@ class Model(tf.keras.Model):
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
         return ctcvr, cat_pred, click_pred, ext_pred
-
