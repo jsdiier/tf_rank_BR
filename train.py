@@ -31,11 +31,43 @@ class Learner:
             loss_click = model.loss_bc(tf.expand_dims(feat['clk_label'], 1), pred_click)
             loss_ext = model.loss_bc(tf.expand_dims(feat['ext_label'], 1), pred_ext)
 
-            final_loss = loss_buy * buy_weight + loss_cat * cat_weight + loss_click * click_weight + loss_ext * ext_weight
+            buy_labels = tf.reshape(feat['cvr_label'], [-1])
+            buy_probs = tf.clip_by_value(tf.reshape(pred_buy, [-1]), 1e-6, 1.0 - 1e-6)
+            buy_logits = tf.math.log(buy_probs) - tf.math.log1p(-buy_probs)
+            add_info = tf.reshape(feat['add_info_list'].values,
+                                  [-1, model_conf.add_info_field_num])
+            uids = add_info[:, model_conf.uid_add_info_index]
+            uid_hash = tf.strings.to_hash_bucket_fast(uids, 2147483647)
+
+            same_uid = tf.equal(tf.expand_dims(uid_hash, 1), tf.expand_dims(uid_hash, 0))
+            positive_row = tf.expand_dims(buy_labels > 0.5, 1)
+            negative_col = tf.expand_dims(buy_labels <= 0.5, 0)
+            valid_pair = tf.logical_and(same_uid, tf.logical_and(positive_row, negative_col))
+            negative_score_matrix = tf.broadcast_to(
+                tf.expand_dims(buy_logits, 0), tf.shape(valid_pair))
+            masked_negative_scores = tf.where(
+                valid_pair, negative_score_matrix,
+                tf.fill(tf.shape(negative_score_matrix), tf.constant(-1e9, buy_logits.dtype)))
+            hardest_negative = tf.reduce_max(masked_negative_scores, axis=1)
+            valid_positive = tf.reduce_any(valid_pair, axis=1)
+            pair_losses = tf.boolean_mask(
+                tf.nn.softplus(hardest_negative - buy_logits), valid_positive)
+            pair_count = tf.minimum(
+                tf.size(pair_losses),
+                tf.constant(model_conf.buy_uid_pairwise_max_pairs, tf.int32))
+            pairwise_loss = tf.cond(
+                pair_count > 0,
+                lambda: tf.reduce_mean(tf.sort(pair_losses, direction='DESCENDING')[:pair_count]),
+                lambda: tf.constant(0.0, dtype=pred_buy.dtype))
+
+            final_loss = (loss_buy * buy_weight + loss_cat * cat_weight +
+                          loss_click * click_weight + loss_ext * ext_weight +
+                          model_conf.buy_uid_pairwise_loss_weight * pairwise_loss)
 
             gradients = tape.gradient(final_loss, model.trainable_weights)
         model.optimizer.apply_gradients(zip(gradients, model.trainable_weights))
-        return loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext
+        return (loss_buy, loss_cat, loss_click, loss_ext, final_loss,
+                pred_buy, pred_cat, pred_click, pred_ext, pairwise_loss, pair_count)
 
     def _date_range(self, start, end):
         """返回 [start, end] 闭区间内的所有天(YYYYMMDD 字符串,升序)"""
@@ -167,7 +199,9 @@ class Learner:
             self.cnt += label_arrs[0].shape[0]
             self.pos += [a.sum() for a in label_arrs]
 
-            loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext = self.train_step(feat)
+            (loss_buy, loss_cat, loss_click, loss_ext, final_loss,
+             pred_buy, pred_cat, pred_click, pred_ext,
+             pairwise_loss, pair_count) = self.train_step(feat)
 
             #收集 uid 采样子集的 pred/label 到内存,当天训完直接算指标
             if mfout is not None:
@@ -200,14 +234,17 @@ class Learner:
                     tf.summary.scalar('loss_click', tf.reduce_mean(loss_click), step=global_step)
                     tf.summary.scalar('loss_ext', tf.reduce_mean(loss_ext), step=global_step)
                     tf.summary.scalar('loss/total', tf.reduce_mean(final_loss), step=global_step)
+                    tf.summary.scalar('loss/buy_uid_pairwise', pairwise_loss, step=global_step)
+                    tf.summary.scalar('data/buy_uid_pair_count', pair_count, step=global_step)
 
                     tf.summary.scalar('data/pos_rate_buy', self.pos[0] / max(self.cnt, 1), step=global_step)
                     tf.summary.scalar('data/pos_rate_click', self.pos[2] / max(self.cnt, 1), step=global_step)
 
                 print(datetime.datetime.now(),
-                        "day %s steps: %d, buy loss: %04f, pos: %d, cnt: %d,  cat loss: %04f, cat pos: %d,  click loss: %04f, click pos: %d,  ext loss: %04f, ext pos: %d, sampled: %d" % (
+                        "day %s steps: %d, buy loss: %04f, pos: %d, cnt: %d,  cat loss: %04f, cat pos: %d,  click loss: %04f, click pos: %d,  ext loss: %04f, ext pos: %d, pairwise loss: %04f, pairs: %d, sampled: %d" % (
                         day, self.gstep, tf.reduce_mean(loss_buy), self.pos[0], self.cnt, tf.reduce_mean(loss_cat), self.pos[1],
-                        tf.reduce_mean(loss_click), self.pos[2], tf.reduce_mean(loss_ext), self.pos[3], n_sampled))
+                        tf.reduce_mean(loss_click), self.pos[2], tf.reduce_mean(loss_ext), self.pos[3],
+                        pairwise_loss, pair_count, n_sampled))
 
         if step < 0:
             print(datetime.datetime.now(), "day %s finish, no batches" % day)
