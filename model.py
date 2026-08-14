@@ -165,6 +165,8 @@ class Model(tf.keras.Model):
                                                    kernel_regularizer=regularizers.l2(model_conf.l2_reg))
         self.dense_concat3 = tf.keras.layers.Dense(1, activation="sigmoid",
                                                    kernel_regularizer=regularizers.l2(model_conf.l2_reg))
+        self.buy_cat_click_residual_alpha = self.add_weight(
+            name='buy_cat_click_residual_alpha', shape=(), initializer='zeros', trainable=True)
 
     def set_summary_writer(self, writer, histogram_freq=100):
         self.summary_writer = writer
@@ -589,7 +591,17 @@ class Model(tf.keras.Model):
 
         cat_pred = cat_pred_org
 
-        ctcvr = tf.math.multiply(click_pred, cvr_pred_org)
+        base_ctcvr = tf.clip_by_value(
+            tf.math.multiply(click_pred, cvr_pred_org), 1e-6, 1.0 - 1e-6)
+        safe_cat = tf.clip_by_value(cat_pred_org, 1e-6, 1.0 - 1e-6)
+        safe_click = tf.clip_by_value(click_pred, 1e-6, 1.0 - 1e-6)
+        base_logit = tf.math.log(base_ctcvr) - tf.math.log1p(-base_ctcvr)
+        cat_logit = tf.math.log(safe_cat) - tf.math.log1p(-safe_cat)
+        click_logit = tf.math.log(safe_click) - tf.math.log1p(-safe_click)
+        relative_cat_residual = tf.stop_gradient(cat_logit - click_logit)
+        residual_weight = (model_conf.buy_cat_click_residual_scale *
+                           tf.math.tanh(self.buy_cat_click_residual_alpha))
+        ctcvr = tf.math.sigmoid(base_logit + residual_weight * relative_cat_residual)
 
         if self.is_save_model or self.pred:
             final_pred = ctcvr
@@ -600,4 +612,3 @@ class Model(tf.keras.Model):
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
         return ctcvr, cat_pred, click_pred, ext_pred
-
