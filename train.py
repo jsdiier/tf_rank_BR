@@ -23,7 +23,7 @@ class Learner:
     @tf.function(experimental_relax_shapes=True)
     def train_step(self, feat, buy_weight=1.0, cat_weight=1.0, click_weight=1.0, ext_weight=1.0):
         model = self.model
-        with tf.GradientTape() as tape:
+        with tf.GradientTape(persistent=True) as tape:
             pred_buy, pred_cat, pred_click, pred_ext = model([feat['fea_ids'], feat['fea_vals']])
 
             loss_buy = model.loss_bc(tf.expand_dims(feat['cvr_label'], 1), pred_buy)
@@ -33,9 +33,50 @@ class Learner:
 
             final_loss = loss_buy * buy_weight + loss_cat * cat_weight + loss_click * click_weight + loss_ext * ext_weight
 
-            gradients = tape.gradient(final_loss, model.trainable_weights)
-        model.optimizer.apply_gradients(zip(gradients, model.trainable_weights))
-        return loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext
+            buy_objective = tf.reduce_sum(loss_buy * buy_weight)
+            aux_objective = tf.reduce_sum(
+                loss_cat * cat_weight + loss_click * click_weight + loss_ext * ext_weight)
+            total_objective = tf.reduce_sum(final_loss)
+
+        variables = model.trainable_weights
+        gradients = tape.gradient(total_objective, variables)
+        buy_gradients = tape.gradient(buy_objective, variables)
+        aux_gradients = tape.gradient(aux_objective, variables)
+        del tape
+
+        shared_name_tokens = (
+            'rank_mixer', 'rankmixer', 'global_click_seq', 'global_pay_seq',
+            '12h_click_cate_id_seq', 'search_pay_seq_long', 'search_clk_seq_long',
+            'search_query_seq_long', 'seq_proj', 'seq_combine', 'seq_ln')
+        shared_indices = [
+            i for i, variable in enumerate(variables)
+            if any(token in variable.name for token in shared_name_tokens)
+            and buy_gradients[i] is not None and aux_gradients[i] is not None
+        ]
+
+        buy_shared = [tf.convert_to_tensor(buy_gradients[i]) for i in shared_indices]
+        aux_shared = [tf.convert_to_tensor(aux_gradients[i]) for i in shared_indices]
+        dot = tf.add_n([
+            tf.reduce_sum(buy_grad * aux_grad)
+            for buy_grad, aux_grad in zip(buy_shared, aux_shared)])
+        buy_norm_sq = tf.add_n([tf.reduce_sum(tf.square(grad)) for grad in buy_shared])
+        aux_norm_sq = tf.add_n([tf.reduce_sum(tf.square(grad)) for grad in aux_shared])
+        epsilon = tf.constant(model_conf.pcgrad_epsilon, tf.float32)
+        conflict = dot < 0.0
+        buy_coeff = tf.where(conflict, dot / tf.maximum(aux_norm_sq, epsilon), 0.0)
+        aux_coeff = tf.where(conflict, dot / tf.maximum(buy_norm_sq, epsilon), 0.0)
+
+        projected_gradients = list(gradients)
+        for index, buy_grad, aux_grad in zip(shared_indices, buy_shared, aux_shared):
+            projected_buy = buy_grad - buy_coeff * aux_grad
+            projected_aux = aux_grad - aux_coeff * buy_grad
+            projected_gradients[index] = projected_buy + projected_aux
+
+        cosine = dot / tf.sqrt(tf.maximum(buy_norm_sq * aux_norm_sq, epsilon))
+        model.optimizer.apply_gradients(zip(projected_gradients, variables))
+        return (loss_buy, loss_cat, loss_click, loss_ext, final_loss,
+                pred_buy, pred_cat, pred_click, pred_ext, cosine,
+                tf.cast(conflict, tf.float32))
 
     def _date_range(self, start, end):
         """返回 [start, end] 闭区间内的所有天(YYYYMMDD 字符串,升序)"""
@@ -167,7 +208,9 @@ class Learner:
             self.cnt += label_arrs[0].shape[0]
             self.pos += [a.sum() for a in label_arrs]
 
-            loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext = self.train_step(feat)
+            (loss_buy, loss_cat, loss_click, loss_ext, final_loss,
+             pred_buy, pred_cat, pred_click, pred_ext,
+             gradient_cosine, gradient_conflict) = self.train_step(feat)
 
             #收集 uid 采样子集的 pred/label 到内存,当天训完直接算指标
             if mfout is not None:
@@ -200,14 +243,17 @@ class Learner:
                     tf.summary.scalar('loss_click', tf.reduce_mean(loss_click), step=global_step)
                     tf.summary.scalar('loss_ext', tf.reduce_mean(loss_ext), step=global_step)
                     tf.summary.scalar('loss/total', tf.reduce_mean(final_loss), step=global_step)
+                    tf.summary.scalar('gradient/buy_aux_cosine', gradient_cosine, step=global_step)
+                    tf.summary.scalar('gradient/buy_aux_conflict', gradient_conflict, step=global_step)
 
                     tf.summary.scalar('data/pos_rate_buy', self.pos[0] / max(self.cnt, 1), step=global_step)
                     tf.summary.scalar('data/pos_rate_click', self.pos[2] / max(self.cnt, 1), step=global_step)
 
                 print(datetime.datetime.now(),
-                        "day %s steps: %d, buy loss: %04f, pos: %d, cnt: %d,  cat loss: %04f, cat pos: %d,  click loss: %04f, click pos: %d,  ext loss: %04f, ext pos: %d, sampled: %d" % (
+                        "day %s steps: %d, buy loss: %04f, pos: %d, cnt: %d,  cat loss: %04f, cat pos: %d,  click loss: %04f, click pos: %d,  ext loss: %04f, ext pos: %d, grad cosine: %04f, conflict: %.0f, sampled: %d" % (
                         day, self.gstep, tf.reduce_mean(loss_buy), self.pos[0], self.cnt, tf.reduce_mean(loss_cat), self.pos[1],
-                        tf.reduce_mean(loss_click), self.pos[2], tf.reduce_mean(loss_ext), self.pos[3], n_sampled))
+                        tf.reduce_mean(loss_click), self.pos[2], tf.reduce_mean(loss_ext), self.pos[3],
+                        gradient_cosine, gradient_conflict, n_sampled))
 
         if step < 0:
             print(datetime.datetime.now(), "day %s finish, no batches" % day)
