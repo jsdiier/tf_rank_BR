@@ -24,18 +24,41 @@ class Learner:
     def train_step(self, feat, buy_weight=1.0, cat_weight=1.0, click_weight=1.0, ext_weight=1.0):
         model = self.model
         with tf.GradientTape() as tape:
-            pred_buy, pred_cat, pred_click, pred_ext = model([feat['fea_ids'], feat['fea_vals']])
+            (pred_buy, pred_cat, pred_click, pred_ext,
+             cat_given_click, buy_given_cat) = model(
+                [feat['fea_ids'], feat['fea_vals']], return_funnel_aux=True)
 
             loss_buy = model.loss_bc(tf.expand_dims(feat['cvr_label'], 1), pred_buy)
             loss_cat = model.loss_bc(tf.expand_dims(feat['cat_label'], 1), pred_cat)
             loss_click = model.loss_bc(tf.expand_dims(feat['clk_label'], 1), pred_click)
             loss_ext = model.loss_bc(tf.expand_dims(feat['ext_label'], 1), pred_ext)
 
-            final_loss = loss_buy * buy_weight + loss_cat * cat_weight + loss_click * click_weight + loss_ext * ext_weight
+            click_labels = tf.reshape(feat['clk_label'], [-1])
+            cat_labels = tf.reshape(feat['cat_label'], [-1])
+            buy_labels = tf.reshape(feat['cvr_label'], [-1])
+            cat_conditional_loss_all = model.loss_bc(
+                cat_labels, tf.reshape(cat_given_click, [-1]))
+            buy_conditional_loss_all = model.loss_bc(
+                buy_labels, tf.reshape(buy_given_cat, [-1]))
+            click_mask = tf.cast(click_labels > 0.5, cat_conditional_loss_all.dtype)
+            cat_mask = tf.cast(cat_labels > 0.5, buy_conditional_loss_all.dtype)
+            cat_conditional_loss = (
+                tf.reduce_sum(cat_conditional_loss_all * click_mask) /
+                tf.maximum(tf.reduce_sum(click_mask), 1.0))
+            buy_conditional_loss = (
+                tf.reduce_sum(buy_conditional_loss_all * cat_mask) /
+                tf.maximum(tf.reduce_sum(cat_mask), 1.0))
+
+            final_loss = (loss_buy * buy_weight + loss_cat * cat_weight +
+                          loss_click * click_weight + loss_ext * ext_weight +
+                          model_conf.funnel_cat_aux_loss_weight * cat_conditional_loss +
+                          model_conf.funnel_buy_aux_loss_weight * buy_conditional_loss)
 
             gradients = tape.gradient(final_loss, model.trainable_weights)
         model.optimizer.apply_gradients(zip(gradients, model.trainable_weights))
-        return loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext
+        return (loss_buy, loss_cat, loss_click, loss_ext, final_loss,
+                pred_buy, pred_cat, pred_click, pred_ext,
+                cat_conditional_loss, buy_conditional_loss)
 
     def _date_range(self, start, end):
         """返回 [start, end] 闭区间内的所有天(YYYYMMDD 字符串,升序)"""
@@ -167,7 +190,9 @@ class Learner:
             self.cnt += label_arrs[0].shape[0]
             self.pos += [a.sum() for a in label_arrs]
 
-            loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext = self.train_step(feat)
+            (loss_buy, loss_cat, loss_click, loss_ext, final_loss,
+             pred_buy, pred_cat, pred_click, pred_ext,
+             cat_conditional_loss, buy_conditional_loss) = self.train_step(feat)
 
             #收集 uid 采样子集的 pred/label 到内存,当天训完直接算指标
             if mfout is not None:
@@ -200,6 +225,10 @@ class Learner:
                     tf.summary.scalar('loss_click', tf.reduce_mean(loss_click), step=global_step)
                     tf.summary.scalar('loss_ext', tf.reduce_mean(loss_ext), step=global_step)
                     tf.summary.scalar('loss/total', tf.reduce_mean(final_loss), step=global_step)
+                    tf.summary.scalar('loss/cat_given_click', cat_conditional_loss, step=global_step)
+                    tf.summary.scalar('loss/buy_given_cat', buy_conditional_loss, step=global_step)
+                    tf.summary.scalar('model/funnel_residual_gate',
+                                      model.funnel_residual_gate, step=global_step)
 
                     tf.summary.scalar('data/pos_rate_buy', self.pos[0] / max(self.cnt, 1), step=global_step)
                     tf.summary.scalar('data/pos_rate_click', self.pos[2] / max(self.cnt, 1), step=global_step)

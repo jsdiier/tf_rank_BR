@@ -165,6 +165,17 @@ class Model(tf.keras.Model):
                                                    kernel_regularizer=regularizers.l2(model_conf.l2_reg))
         self.dense_concat3 = tf.keras.layers.Dense(1, activation="sigmoid",
                                                    kernel_regularizer=regularizers.l2(model_conf.l2_reg))
+        funnel_reg = regularizers.l2(model_conf.l2_reg)
+        self.cat_given_click_head = tf.keras.Sequential([
+            tf.keras.layers.Dense(64, activation=tf.nn.swish, kernel_regularizer=funnel_reg),
+            tf.keras.layers.Dense(1, activation='sigmoid', kernel_regularizer=funnel_reg),
+        ], name='cat_given_click_head')
+        self.buy_given_cat_head = tf.keras.Sequential([
+            tf.keras.layers.Dense(64, activation=tf.nn.swish, kernel_regularizer=funnel_reg),
+            tf.keras.layers.Dense(1, activation='sigmoid', kernel_regularizer=funnel_reg),
+        ], name='buy_given_cat_head')
+        self.funnel_residual_gate = self.add_weight(
+            name='funnel_residual_gate', shape=(), initializer='zeros', trainable=True)
 
     def set_summary_writer(self, writer, histogram_freq=100):
         self.summary_writer = writer
@@ -446,7 +457,7 @@ class Model(tf.keras.Model):
 
         return weighted_sum
 
-    def call(self, inputs, training=None):
+    def call(self, inputs, training=None, return_funnel_aux=False):
         sids, fids = inputs
         step = self.optimizer.iterations
 
@@ -589,7 +600,18 @@ class Model(tf.keras.Model):
 
         cat_pred = cat_pred_org
 
-        ctcvr = tf.math.multiply(click_pred, cvr_pred_org)
+        base_ctcvr = tf.clip_by_value(
+            tf.math.multiply(click_pred, cvr_pred_org), 1e-6, 1.0 - 1e-6)
+        cat_given_click = self.cat_given_click_head(concat, training=self.training)
+        buy_given_cat = self.buy_given_cat_head(concat, training=self.training)
+        funnel_score = tf.clip_by_value(
+            click_pred * cat_given_click * buy_given_cat, 1e-6, 1.0 - 1e-6)
+        base_logit = tf.math.log(base_ctcvr) - tf.math.log1p(-base_ctcvr)
+        funnel_logit = tf.math.log(funnel_score) - tf.math.log1p(-funnel_score)
+        residual_gate = (model_conf.funnel_residual_scale *
+                         tf.math.tanh(self.funnel_residual_gate))
+        ctcvr = tf.math.sigmoid(
+            base_logit + residual_gate * (funnel_logit - tf.stop_gradient(base_logit)))
 
         if self.is_save_model or self.pred:
             final_pred = ctcvr
@@ -599,5 +621,7 @@ class Model(tf.keras.Model):
             ext_score = ext_pred
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
+        if return_funnel_aux:
+            return (ctcvr, cat_pred, click_pred, ext_pred,
+                    cat_given_click, buy_given_cat)
         return ctcvr, cat_pred, click_pred, ext_pred
-
