@@ -109,6 +109,18 @@ class Model(tf.keras.Model):
         self.seq_pay_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid', name='global_pay_seq')
         self.seq_12h_click_cate_id_attention_layer = DIN_attention_Layer([50, 20], 'sigmoid',
                                                                          name='12h_click_cate_id_seq')
+        seq_query_reg = regularizers.l2(model_conf.l2_reg)
+        self.shop_seq_query_projection = tf.keras.layers.Dense(
+            model_conf.fm_emb_size, activation=tf.nn.swish,
+            kernel_regularizer=seq_query_reg, name='shop_seq_query_projection')
+        self.category_seq_query_projection = tf.keras.layers.Dense(
+            model_conf.fm_emb_size, activation=tf.nn.swish,
+            kernel_regularizer=seq_query_reg, name='category_seq_query_projection')
+        self.semantic_seq_gates = [
+            self.add_weight(name='click_semantic_output_gate', shape=(), initializer='zeros', trainable=True),
+            self.add_weight(name='pay_semantic_output_gate', shape=(), initializer='zeros', trainable=True),
+            self.add_weight(name='category_semantic_output_gate', shape=(), initializer='zeros', trainable=True),
+        ]
         self.attention_layer_search_long_pay = DIN_attention_Layer([50, 20], 'sigmoid', name='search_pay_seq_long')
         self.attention_layer_search_long_clk = DIN_attention_Layer([50, 20], 'sigmoid', name='search_clk_seq_long')
         self.attention_layer_search_long_query = DIN_attention_Layer([50, 20], 'sigmoid', name='search_query_seq_long')
@@ -505,6 +517,22 @@ class Model(tf.keras.Model):
             global_query_input,
             [tf.shape(global_query_input)[0], len(model_conf.global_seq_query_sids) * model_conf.fm_emb_size])
 
+        shop_query_indices = self.slot_id_table.lookup(
+            tf.constant(model_conf.shop_seq_query_sids, dtype=tf.dtypes.int32))
+        shop_query = tf.gather(pooled_output[:, :, 1:], shop_query_indices, axis=1)
+        shop_query = tf.reshape(
+            shop_query,
+            [tf.shape(shop_query)[0], len(model_conf.shop_seq_query_sids) * model_conf.fm_emb_size])
+        shop_query = self.shop_seq_query_projection(shop_query)
+
+        category_query_indices = self.slot_id_table.lookup(
+            tf.constant(model_conf.category_seq_query_sids, dtype=tf.dtypes.int32))
+        category_query = tf.gather(pooled_output[:, :, 1:], category_query_indices, axis=1)
+        category_query = tf.reshape(
+            category_query,
+            [tf.shape(category_query)[0], len(model_conf.category_seq_query_sids) * model_conf.fm_emb_size])
+        category_query = self.category_seq_query_projection(category_query)
+
         # pooled_output_v2, slot_mask_v2 = self.process_and_pool_fused(sid_list, fid_list, table_type='din_ads_table')
         # ads_slot_indices = self.slot_id_table_din_ads.lookup(tf.constant(model_conf.ads_fea_slots, dtype=tf.dtypes.int32))
         # ads_emb = tf.gather(pooled_output_v2, ads_slot_indices, axis=1)
@@ -516,12 +544,26 @@ class Model(tf.keras.Model):
             seq_input = tf.gather(pooled_output[:, :, 1:], seq_slot_indices, axis=1)
             seq_mask = tf.gather(slot_mask, seq_slot_indices, axis=1)
             if seq_name == 'user_click_seq':
-                seq_output = self.seq_click_attention_layer([global_query_input, seq_input, seq_input, seq_mask])
-            elif seq_name == 'user_pay_seq':
-                seq_output = self.seq_pay_attention_layer([global_query_input, seq_input, seq_input, seq_mask])
-            elif seq_name == 'user_12h_click_cateid':
-                seq_output = self.seq_12h_click_cate_id_attention_layer(
+                baseline_output = self.seq_click_attention_layer(
                     [global_query_input, seq_input, seq_input, seq_mask])
+                semantic_output = self.seq_click_attention_layer(
+                    [shop_query, seq_input, seq_input, seq_mask])
+                seq_output = baseline_output + 0.1 * tf.math.tanh(
+                    self.semantic_seq_gates[0]) * semantic_output
+            elif seq_name == 'user_pay_seq':
+                baseline_output = self.seq_pay_attention_layer(
+                    [global_query_input, seq_input, seq_input, seq_mask])
+                semantic_output = self.seq_pay_attention_layer(
+                    [shop_query, seq_input, seq_input, seq_mask])
+                seq_output = baseline_output + 0.1 * tf.math.tanh(
+                    self.semantic_seq_gates[1]) * semantic_output
+            elif seq_name == 'user_12h_click_cateid':
+                baseline_output = self.seq_12h_click_cate_id_attention_layer(
+                    [global_query_input, seq_input, seq_input, seq_mask])
+                semantic_output = self.seq_12h_click_cate_id_attention_layer(
+                    [category_query, seq_input, seq_input, seq_mask])
+                seq_output = baseline_output + 0.1 * tf.math.tanh(
+                    self.semantic_seq_gates[2]) * semantic_output
             seq_outputs.append(seq_output)
 
         # 搜索支付序列
@@ -600,4 +642,3 @@ class Model(tf.keras.Model):
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
         return ctcvr, cat_pred, click_pred, ext_pred
-
