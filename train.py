@@ -24,18 +24,40 @@ class Learner:
     def train_step(self, feat, buy_weight=1.0, cat_weight=1.0, click_weight=1.0, ext_weight=1.0):
         model = self.model
         with tf.GradientTape() as tape:
-            pred_buy, pred_cat, pred_click, pred_ext = model([feat['fea_ids'], feat['fea_vals']])
+            (pred_buy, pred_cat, pred_click, pred_ext, pred_buy_base,
+             adapted_cvr, postclick_residual) = model(
+                [feat['fea_ids'], feat['fea_vals']],
+                return_postclick_aux=True)
 
-            loss_buy = model.loss_bc(tf.expand_dims(feat['cvr_label'], 1), pred_buy)
+            buy_label = tf.expand_dims(feat['cvr_label'], 1)
+            # Keep the original four losses and their original prediction paths.
+            loss_buy = model.loss_bc(buy_label, pred_buy_base)
             loss_cat = model.loss_bc(tf.expand_dims(feat['cat_label'], 1), pred_cat)
             loss_click = model.loss_bc(tf.expand_dims(feat['clk_label'], 1), pred_click)
             loss_ext = model.loss_bc(tf.expand_dims(feat['ext_label'], 1), pred_ext)
 
-            final_loss = loss_buy * buy_weight + loss_cat * cat_weight + loss_click * click_weight + loss_ext * ext_weight
+            # Conditional BCE is active only on clicked samples.  Normalizing
+            # the mask keeps its batch-level scale comparable across batches;
+            # adapted_cvr and its input representation are detached from every
+            # baseline variable, so this term trains only the new expert.
+            click_mask = tf.cast(tf.reshape(feat['clk_label'], [-1]) > 0.5,
+                                 adapted_cvr.dtype)
+            adapter_loss = model.loss_bc(buy_label, adapted_cvr)
+            normalized_click_mask = click_mask / tf.maximum(
+                tf.reduce_mean(click_mask), tf.constant(1e-6, adapted_cvr.dtype))
+            loss_postclick_adapter = adapter_loss * normalized_click_mask
+            click_coverage = tf.reduce_mean(click_mask)
+
+            final_loss = (loss_buy * buy_weight + loss_cat * cat_weight +
+                          loss_click * click_weight + loss_ext * ext_weight +
+                          model_conf.buy_postclick_expert_loss_weight *
+                          loss_postclick_adapter)
 
             gradients = tape.gradient(final_loss, model.trainable_weights)
         model.optimizer.apply_gradients(zip(gradients, model.trainable_weights))
-        return loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext
+        return (loss_buy, loss_cat, loss_click, loss_ext,
+                loss_postclick_adapter, final_loss, pred_buy, pred_cat,
+                pred_click, pred_ext, postclick_residual, click_coverage)
 
     def _date_range(self, start, end):
         """返回 [start, end] 闭区间内的所有天(YYYYMMDD 字符串,升序)"""
@@ -167,7 +189,10 @@ class Learner:
             self.cnt += label_arrs[0].shape[0]
             self.pos += [a.sum() for a in label_arrs]
 
-            loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext = self.train_step(feat)
+            (loss_buy, loss_cat, loss_click, loss_ext,
+             loss_postclick_adapter, final_loss, pred_buy, pred_cat,
+             pred_click, pred_ext, postclick_residual,
+             click_coverage) = self.train_step(feat)
 
             #收集 uid 采样子集的 pred/label 到内存,当天训完直接算指标
             if mfout is not None:
@@ -199,15 +224,22 @@ class Learner:
                     tf.summary.scalar('loss_cat', tf.reduce_mean(loss_cat), step=global_step)
                     tf.summary.scalar('loss_click', tf.reduce_mean(loss_click), step=global_step)
                     tf.summary.scalar('loss_ext', tf.reduce_mean(loss_ext), step=global_step)
+                    tf.summary.scalar('loss/buy_postclick_adapter',
+                                      tf.reduce_mean(loss_postclick_adapter), step=global_step)
+                    tf.summary.scalar('model/buy_postclick_residual_mean',
+                                      tf.reduce_mean(postclick_residual), step=global_step)
+                    tf.summary.scalar('data/postclick_expert_click_coverage',
+                                      click_coverage, step=global_step)
                     tf.summary.scalar('loss/total', tf.reduce_mean(final_loss), step=global_step)
 
                     tf.summary.scalar('data/pos_rate_buy', self.pos[0] / max(self.cnt, 1), step=global_step)
                     tf.summary.scalar('data/pos_rate_click', self.pos[2] / max(self.cnt, 1), step=global_step)
 
                 print(datetime.datetime.now(),
-                        "day %s steps: %d, buy loss: %04f, pos: %d, cnt: %d,  cat loss: %04f, cat pos: %d,  click loss: %04f, click pos: %d,  ext loss: %04f, ext pos: %d, sampled: %d" % (
+                        "day %s steps: %d, buy loss: %04f, pos: %d, cnt: %d,  cat loss: %04f, cat pos: %d,  click loss: %04f, click pos: %d,  ext loss: %04f, ext pos: %d, postclick coverage: %04f, sampled: %d" % (
                         day, self.gstep, tf.reduce_mean(loss_buy), self.pos[0], self.cnt, tf.reduce_mean(loss_cat), self.pos[1],
-                        tf.reduce_mean(loss_click), self.pos[2], tf.reduce_mean(loss_ext), self.pos[3], n_sampled))
+                        tf.reduce_mean(loss_click), self.pos[2], tf.reduce_mean(loss_ext), self.pos[3],
+                        click_coverage, n_sampled))
 
         if step < 0:
             print(datetime.datetime.now(), "day %s finish, no batches" % day)

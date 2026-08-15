@@ -165,6 +165,19 @@ class Model(tf.keras.Model):
                                                    kernel_regularizer=regularizers.l2(model_conf.l2_reg))
         self.dense_concat3 = tf.keras.layers.Dense(1, activation="sigmoid",
                                                    kernel_regularizer=regularizers.l2(model_conf.l2_reg))
+        expert_reg = regularizers.l2(model_conf.l2_reg)
+        self.buy_postclick_expert_hidden = tf.keras.layers.Dense(
+            model_conf.buy_postclick_expert_hidden_dim,
+            activation=tf.nn.swish,
+            kernel_regularizer=expert_reg,
+            name='buy_postclick_expert_hidden')
+        self.buy_postclick_expert_output = tf.keras.layers.Dense(
+            1,
+            activation=None,
+            kernel_initializer='zeros',
+            bias_initializer='zeros',
+            kernel_regularizer=expert_reg,
+            name='buy_postclick_expert_output')
 
     def set_summary_writer(self, writer, histogram_freq=100):
         self.summary_writer = writer
@@ -446,7 +459,15 @@ class Model(tf.keras.Model):
 
         return weighted_sum
 
-    def call(self, inputs, training=None):
+    @staticmethod
+    def _apply_logit_residual(probability, residual):
+        """Exact, bounded form of sigmoid(logit(probability) + residual)."""
+        odds_multiplier = tf.math.exp(residual)
+        numerator = probability * odds_multiplier
+        denominator = 1.0 - probability + numerator
+        return numerator / denominator
+
+    def call(self, inputs, training=None, return_postclick_aux=False):
         sids, fids = inputs
         step = self.optimizer.iterations
 
@@ -589,15 +610,33 @@ class Model(tf.keras.Model):
 
         cat_pred = cat_pred_org
 
-        ctcvr = tf.math.multiply(click_pred, cvr_pred_org)
+        base_ctcvr = tf.math.multiply(click_pred, cvr_pred_org)
+
+        # The conditional expert reads the existing shared representation but
+        # cannot update embeddings, sequence layers, RankMixer or old towers.
+        expert_hidden = self.buy_postclick_expert_hidden(
+            tf.stop_gradient(concat), training=self.training)
+        raw_residual = self.buy_postclick_expert_output(
+            expert_hidden, training=self.training)
+        bounded_residual = (model_conf.buy_postclick_expert_residual_bound *
+                            tf.math.tanh(raw_residual))
+        detached_cvr_probability = tf.stop_gradient(cvr_pred_org)
+        adapted_cvr = self._apply_logit_residual(
+            detached_cvr_probability, bounded_residual)
+
+        # stop_gradient is intentionally not required around click_pred for
+        # serving: it changes gradients only, never numerical inference values.
+        combined_ctcvr = tf.math.multiply(click_pred, adapted_cvr)
 
         if self.is_save_model or self.pred:
-            final_pred = ctcvr
+            final_pred = combined_ctcvr
             cvr_score = cvr_pred_org
             ctr_score = click_pred
             cat_score = cat_pred_org
             ext_score = ext_pred
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
-        return ctcvr, cat_pred, click_pred, ext_pred
-
+        if return_postclick_aux:
+            return (combined_ctcvr, cat_pred, click_pred, ext_pred,
+                    base_ctcvr, adapted_cvr, bounded_residual)
+        return combined_ctcvr, cat_pred, click_pred, ext_pred
