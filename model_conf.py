@@ -62,6 +62,13 @@ eval_uid_ratio = 0.2
 # 离线推理性能测试：先预热，再统计固定数量的完整batch。
 inference_benchmark_warmup_batches = 20
 inference_benchmark_measure_batches = 100
+
+# BUY-priority asymmetric auxiliary projection.  Only the shared dense/
+# projection blocks and RankMixer are modified; embeddings and task-private
+# towers keep their baseline gradients.
+buy_priority_aux_projection_enabled = True
+buy_priority_aux_projection_epsilon = 1e-12
+buy_priority_aux_projection_log_interval = 100
 #每条样本的 add_infos 字段个数
 add_info_field_num = 24
 #uid 在每条样本 add_infos 中的下标

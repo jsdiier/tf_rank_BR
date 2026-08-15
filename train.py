@@ -23,7 +23,7 @@ class Learner:
     @tf.function(experimental_relax_shapes=True)
     def train_step(self, feat, buy_weight=1.0, cat_weight=1.0, click_weight=1.0, ext_weight=1.0):
         model = self.model
-        with tf.GradientTape() as tape:
+        with tf.GradientTape(persistent=True) as tape:
             pred_buy, pred_cat, pred_click, pred_ext = model([feat['fea_ids'], feat['fea_vals']])
 
             loss_buy = model.loss_bc(tf.expand_dims(feat['cvr_label'], 1), pred_buy)
@@ -33,9 +33,96 @@ class Learner:
 
             final_loss = loss_buy * buy_weight + loss_cat * cat_weight + loss_click * click_weight + loss_ext * ext_weight
 
-            gradients = tape.gradient(final_loss, model.trainable_weights)
-        model.optimizer.apply_gradients(zip(gradients, model.trainable_weights))
-        return loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext
+            buy_objective = tf.reduce_sum(loss_buy * buy_weight)
+            # CAT and CLICK are the only auxiliary tasks considered for the
+            # asymmetric projection.  EXT is intentionally kept independent.
+            aux_objective = tf.reduce_sum(
+                loss_cat * cat_weight + loss_click * click_weight)
+            ext_objective = tf.reduce_sum(loss_ext * ext_weight)
+            total_objective = tf.reduce_sum(final_loss)
+
+        variables = model.trainable_weights
+        baseline_gradients = tape.gradient(total_objective, variables)
+
+        projection_enabled = model_conf.buy_priority_aux_projection_enabled
+        projection_gradients = list(baseline_gradients)
+        cosine = tf.constant(0.0, dtype=tf.float32)
+        conflict = tf.constant(False)
+        buy_norm = tf.constant(0.0, dtype=tf.float32)
+        aux_norm = tf.constant(0.0, dtype=tf.float32)
+        ext_norm = tf.constant(0.0, dtype=tf.float32)
+        projected_aux_norm = tf.constant(0.0, dtype=tf.float32)
+
+        if projection_enabled:
+            projection_variable_ids = {
+                id(variable)
+                for variable in model.get_buy_priority_projection_variables()
+            }
+            shared_indices = [
+                index for index, variable in enumerate(variables)
+                if id(variable) in projection_variable_ids
+            ]
+            if not shared_indices:
+                raise ValueError("BUY-priority projection selected no shared variables")
+
+            shared_variables = [variables[index] for index in shared_indices]
+            buy_shared = tape.gradient(buy_objective, shared_variables)
+            aux_shared = tape.gradient(aux_objective, shared_variables)
+            ext_shared = tape.gradient(ext_objective, shared_variables)
+
+            if any(gradient is None for gradient in buy_shared + aux_shared + ext_shared):
+                raise ValueError("A selected shared variable is disconnected from a task loss")
+
+            buy_shared = [tf.convert_to_tensor(gradient) for gradient in buy_shared]
+            aux_shared = [tf.convert_to_tensor(gradient) for gradient in aux_shared]
+            ext_shared = [tf.convert_to_tensor(gradient) for gradient in ext_shared]
+
+            dot = tf.add_n([
+                tf.reduce_sum(buy_gradient * aux_gradient)
+                for buy_gradient, aux_gradient in zip(buy_shared, aux_shared)
+            ])
+            buy_norm_sq = tf.add_n([
+                tf.reduce_sum(tf.square(gradient)) for gradient in buy_shared
+            ])
+            aux_norm_sq = tf.add_n([
+                tf.reduce_sum(tf.square(gradient)) for gradient in aux_shared
+            ])
+            ext_norm_sq = tf.add_n([
+                tf.reduce_sum(tf.square(gradient)) for gradient in ext_shared
+            ])
+            epsilon = tf.cast(
+                model_conf.buy_priority_aux_projection_epsilon, dot.dtype)
+            conflict = dot < 0.0
+
+            # Preserve g_buy exactly.  On conflict, remove only the component
+            # of g_aux that opposes BUY; EXT is added back untouched.
+            projection_coefficient = tf.where(
+                conflict,
+                dot / tf.maximum(buy_norm_sq, epsilon),
+                tf.zeros_like(dot))
+            projected_aux = [
+                aux_gradient - projection_coefficient * buy_gradient
+                for buy_gradient, aux_gradient in zip(buy_shared, aux_shared)
+            ]
+
+            for index, buy_gradient, aux_gradient, ext_gradient in zip(
+                    shared_indices, buy_shared, projected_aux, ext_shared):
+                projection_gradients[index] = (
+                    buy_gradient + aux_gradient + ext_gradient)
+
+            buy_norm = tf.sqrt(tf.maximum(buy_norm_sq, epsilon))
+            aux_norm = tf.sqrt(tf.maximum(aux_norm_sq, epsilon))
+            ext_norm = tf.sqrt(tf.maximum(ext_norm_sq, epsilon))
+            projected_aux_norm = tf.linalg.global_norm(projected_aux)
+            cosine = dot / tf.sqrt(
+                tf.maximum(buy_norm_sq * aux_norm_sq, epsilon))
+
+        del tape
+        model.optimizer.apply_gradients(zip(projection_gradients, variables))
+        return (loss_buy, loss_cat, loss_click, loss_ext, final_loss,
+                pred_buy, pred_cat, pred_click, pred_ext, cosine,
+                tf.cast(conflict, tf.float32), buy_norm, aux_norm, ext_norm,
+                projected_aux_norm)
 
     def _date_range(self, start, end):
         """返回 [start, end] 闭区间内的所有天(YYYYMMDD 字符串,升序)"""
@@ -161,13 +248,34 @@ class Learner:
         eval_preds = [[] for _ in label_keys]
 
         n_sampled = 0
+        projection_log_interval = max(
+            int(model_conf.buy_priority_aux_projection_log_interval), 1)
+        projection_metric_window = {
+            'cosine': [],
+            'conflict': [],
+            'buy_norm': [],
+            'aux_norm': [],
+            'ext_norm': [],
+            'projected_aux_norm': [],
+        }
         step = -1
         for step, feat in enumerate(train_data):
             label_arrs = [np.reshape(feat[k].numpy(), [-1]) for k in label_keys]
             self.cnt += label_arrs[0].shape[0]
             self.pos += [a.sum() for a in label_arrs]
 
-            loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext = self.train_step(feat)
+            (loss_buy, loss_cat, loss_click, loss_ext, final_loss,
+             pred_buy, pred_cat, pred_click, pred_ext, gradient_cosine,
+             gradient_conflict, buy_gradient_norm, aux_gradient_norm,
+             ext_gradient_norm, projected_aux_gradient_norm) = self.train_step(feat)
+
+            projection_metric_window['cosine'].append(gradient_cosine)
+            projection_metric_window['conflict'].append(gradient_conflict)
+            projection_metric_window['buy_norm'].append(buy_gradient_norm)
+            projection_metric_window['aux_norm'].append(aux_gradient_norm)
+            projection_metric_window['ext_norm'].append(ext_gradient_norm)
+            projection_metric_window['projected_aux_norm'].append(
+                projected_aux_gradient_norm)
 
             #收集 uid 采样子集的 pred/label 到内存,当天训完直接算指标
             if mfout is not None:
@@ -192,22 +300,46 @@ class Learner:
                         eval_preds[t_idx].extend(pred_arrs[t_idx][sel].tolist())
 
             self.gstep += 1
-            if train_writer is not None and self.gstep % 100 == 0:
+            if self.gstep % projection_log_interval == 0:
+                projection_metrics = {
+                    name: tf.reduce_mean(tf.stack(values))
+                    for name, values in projection_metric_window.items()
+                }
                 global_step = model.optimizer.iterations.numpy()  # 只在打点时同步一次,作 x 轴
-                with train_writer.as_default():
-                    tf.summary.scalar('loss_buy', tf.reduce_mean(loss_buy), step=global_step)
-                    tf.summary.scalar('loss_cat', tf.reduce_mean(loss_cat), step=global_step)
-                    tf.summary.scalar('loss_click', tf.reduce_mean(loss_click), step=global_step)
-                    tf.summary.scalar('loss_ext', tf.reduce_mean(loss_ext), step=global_step)
-                    tf.summary.scalar('loss/total', tf.reduce_mean(final_loss), step=global_step)
+                if train_writer is not None:
+                    with train_writer.as_default():
+                        tf.summary.scalar('loss_buy', tf.reduce_mean(loss_buy), step=global_step)
+                        tf.summary.scalar('loss_cat', tf.reduce_mean(loss_cat), step=global_step)
+                        tf.summary.scalar('loss_click', tf.reduce_mean(loss_click), step=global_step)
+                        tf.summary.scalar('loss_ext', tf.reduce_mean(loss_ext), step=global_step)
+                        tf.summary.scalar('loss/total', tf.reduce_mean(final_loss), step=global_step)
 
-                    tf.summary.scalar('data/pos_rate_buy', self.pos[0] / max(self.cnt, 1), step=global_step)
-                    tf.summary.scalar('data/pos_rate_click', self.pos[2] / max(self.cnt, 1), step=global_step)
+                        tf.summary.scalar(
+                            'gradient/buy_aux_cosine', projection_metrics['cosine'], step=global_step)
+                        tf.summary.scalar(
+                            'gradient/buy_aux_conflict_rate', projection_metrics['conflict'], step=global_step)
+                        tf.summary.scalar(
+                            'gradient/buy_norm', projection_metrics['buy_norm'], step=global_step)
+                        tf.summary.scalar(
+                            'gradient/cat_click_aux_norm', projection_metrics['aux_norm'], step=global_step)
+                        tf.summary.scalar(
+                            'gradient/ext_norm', projection_metrics['ext_norm'], step=global_step)
+                        tf.summary.scalar(
+                            'gradient/projected_aux_norm', projection_metrics['projected_aux_norm'], step=global_step)
+
+                        tf.summary.scalar('data/pos_rate_buy', self.pos[0] / max(self.cnt, 1), step=global_step)
+                        tf.summary.scalar('data/pos_rate_click', self.pos[2] / max(self.cnt, 1), step=global_step)
 
                 print(datetime.datetime.now(),
-                        "day %s steps: %d, buy loss: %04f, pos: %d, cnt: %d,  cat loss: %04f, cat pos: %d,  click loss: %04f, click pos: %d,  ext loss: %04f, ext pos: %d, sampled: %d" % (
+                        "day %s steps: %d, buy loss: %04f, pos: %d, cnt: %d,  cat loss: %04f, cat pos: %d,  click loss: %04f, click pos: %d,  ext loss: %04f, ext pos: %d, grad cosine: %04f, conflict rate: %04f, grad norms buy/aux/ext/proj_aux: %04f/%04f/%04f/%04f, sampled: %d" % (
                         day, self.gstep, tf.reduce_mean(loss_buy), self.pos[0], self.cnt, tf.reduce_mean(loss_cat), self.pos[1],
-                        tf.reduce_mean(loss_click), self.pos[2], tf.reduce_mean(loss_ext), self.pos[3], n_sampled))
+                        tf.reduce_mean(loss_click), self.pos[2], tf.reduce_mean(loss_ext), self.pos[3],
+                        projection_metrics['cosine'], projection_metrics['conflict'],
+                        projection_metrics['buy_norm'], projection_metrics['aux_norm'],
+                        projection_metrics['ext_norm'], projection_metrics['projected_aux_norm'], n_sampled))
+
+                for values in projection_metric_window.values():
+                    values.clear()
 
         if step < 0:
             print(datetime.datetime.now(), "day %s finish, no batches" % day)

@@ -170,6 +170,36 @@ class Model(tf.keras.Model):
         self.summary_writer = writer
         self.histogram_freq = histogram_freq
 
+    def get_buy_priority_projection_variables(self):
+        """Return the explicit shared dense-variable boundary for projection.
+
+        Embedding tables and the four task-private towers/heads are deliberately
+        absent.  Keeping this boundary object-based avoids accidentally pulling
+        EXT/private variables into the projection because of a name substring.
+        """
+        shared_layers = (
+            self.rankmixer,
+            self.seq_click_attention_layer,
+            self.seq_pay_attention_layer,
+            self.seq_12h_click_cate_id_attention_layer,
+            self.attention_layer_search_long_pay,
+            self.attention_layer_search_long_clk,
+            self.attention_layer_search_long_query,
+            self.pay_seq_ln,
+            self.pay_seq_proj,
+            self.pay_seq_combine,
+            self.clk_seq_ln,
+            self.clk_seq_proj,
+            self.clk_seq_combine,
+            self.query_seq_ln,
+            self.query_seq_proj,
+            self.query_seq_combine,
+        )
+        variables = []
+        for layer in shared_layers:
+            variables.extend(layer.trainable_variables)
+        return variables
+
     def _write_histograms(self, step, gradients=None):
         with self.summary_writer.as_default():
             grad_map = {}
@@ -600,4 +630,3 @@ class Model(tf.keras.Model):
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
         return ctcvr, cat_pred, click_pred, ext_pred
-
