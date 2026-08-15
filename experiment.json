@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "baseline": "tf_train_base_new_try_roll_test_predict_time",
+  "train_start_day": "20260303",
+  "train_end_day": "20260720",
+  "test_start_day": "20260721",
+  "test_end_day": "20260724",
+  "auto_test_start_ckpt_day": "20260724",
+  "auto_test_end_day": "20260801",
+  "require_inference_benchmark": true
+}

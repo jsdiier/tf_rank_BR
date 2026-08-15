@@ -165,6 +165,19 @@ class Model(tf.keras.Model):
                                                    kernel_regularizer=regularizers.l2(model_conf.l2_reg))
         self.dense_concat3 = tf.keras.layers.Dense(1, activation="sigmoid",
                                                    kernel_regularizer=regularizers.l2(model_conf.l2_reg))
+        stacker_reg = regularizers.l2(model_conf.l2_reg)
+        self.buy_multiscore_stacker_hidden = tf.keras.layers.Dense(
+            model_conf.buy_multiscore_hidden_dim,
+            activation=tf.nn.swish,
+            kernel_regularizer=stacker_reg,
+            name='buy_multiscore_stacker_hidden')
+        self.buy_multiscore_stacker_output = tf.keras.layers.Dense(
+            1,
+            activation=None,
+            kernel_initializer='zeros',
+            bias_initializer='zeros',
+            kernel_regularizer=stacker_reg,
+            name='buy_multiscore_stacker_output')
 
     def set_summary_writer(self, writer, histogram_freq=100):
         self.summary_writer = writer
@@ -446,7 +459,20 @@ class Model(tf.keras.Model):
 
         return weighted_sum
 
-    def call(self, inputs, training=None):
+    @staticmethod
+    def _safe_logit(probability):
+        probability = tf.clip_by_value(probability, 1e-6, 1.0 - 1e-6)
+        return tf.math.log(probability) - tf.math.log1p(-probability)
+
+    @staticmethod
+    def _apply_logit_residual(probability, residual):
+        """Exact, bounded form of sigmoid(logit(probability) + residual)."""
+        odds_multiplier = tf.math.exp(residual)
+        numerator = probability * odds_multiplier
+        denominator = 1.0 - probability + numerator
+        return numerator / denominator
+
+    def call(self, inputs, training=None, return_buy_sidecar_aux=False):
         sids, fids = inputs
         step = self.optimizer.iterations
 
@@ -589,15 +615,45 @@ class Model(tf.keras.Model):
 
         cat_pred = cat_pred_org
 
-        ctcvr = tf.math.multiply(click_pred, cvr_pred_org)
+        base_ctcvr = tf.math.multiply(click_pred, cvr_pred_org)
+        click_logit = tf.clip_by_value(self._safe_logit(click_pred), -8.0, 8.0)
+        cat_logit = tf.clip_by_value(self._safe_logit(cat_pred_org), -8.0, 8.0)
+        cvr_logit = tf.clip_by_value(self._safe_logit(cvr_pred_org), -8.0, 8.0)
+
+        # Detached 8-D score summary: three logits, three relative gaps and
+        # two bounded interactions.  No sidecar gradient can enter old towers.
+        stacker_inputs = tf.stop_gradient(tf.concat([
+            click_logit,
+            cat_logit,
+            cvr_logit,
+            cat_logit - click_logit,
+            cvr_logit - click_logit,
+            cvr_logit - cat_logit,
+            tf.math.tanh(click_logit) * tf.math.tanh(cvr_logit),
+            tf.math.tanh(cat_logit) * tf.math.tanh(cvr_logit),
+        ], axis=1))
+        stacker_hidden = self.buy_multiscore_stacker_hidden(
+            stacker_inputs, training=self.training)
+        raw_residual = self.buy_multiscore_stacker_output(
+            stacker_hidden, training=self.training)
+        bounded_residual = (model_conf.buy_multiscore_residual_bound *
+                            tf.math.tanh(raw_residual))
+
+        # Numerically identical between training and serving.  Detaching the
+        # base logit makes the sidecar BCE update only the new MLP.
+        detached_base_probability = tf.stop_gradient(base_ctcvr)
+        combined_ctcvr = self._apply_logit_residual(
+            detached_base_probability, bounded_residual)
 
         if self.is_save_model or self.pred:
-            final_pred = ctcvr
+            final_pred = combined_ctcvr
             cvr_score = cvr_pred_org
             ctr_score = click_pred
             cat_score = cat_pred_org
             ext_score = ext_pred
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
-        return ctcvr, cat_pred, click_pred, ext_pred
-
+        if return_buy_sidecar_aux:
+            return (combined_ctcvr, cat_pred, click_pred, ext_pred,
+                    base_ctcvr, bounded_residual)
+        return combined_ctcvr, cat_pred, click_pred, ext_pred

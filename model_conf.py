@@ -62,6 +62,12 @@ eval_uid_ratio = 0.2
 # 离线推理性能测试：先预热，再统计固定数量的完整batch。
 inference_benchmark_warmup_batches = 20
 inference_benchmark_measure_batches = 100
+
+# Detached BUY score stacker.  The zero-initialized final layer makes the
+# combined score identical to the baseline at initialization.
+buy_multiscore_hidden_dim = 8
+buy_multiscore_residual_bound = 0.25
+buy_multiscore_sidecar_loss_weight = 1.0
 #每条样本的 add_infos 字段个数
 add_info_field_num = 24
 #uid 在每条样本 add_infos 中的下标

@@ -24,18 +24,31 @@ class Learner:
     def train_step(self, feat, buy_weight=1.0, cat_weight=1.0, click_weight=1.0, ext_weight=1.0):
         model = self.model
         with tf.GradientTape() as tape:
-            pred_buy, pred_cat, pred_click, pred_ext = model([feat['fea_ids'], feat['fea_vals']])
+            (pred_buy, pred_cat, pred_click, pred_ext,
+             pred_buy_base, buy_sidecar_residual) = model(
+                [feat['fea_ids'], feat['fea_vals']],
+                return_buy_sidecar_aux=True)
 
-            loss_buy = model.loss_bc(tf.expand_dims(feat['cvr_label'], 1), pred_buy)
+            buy_label = tf.expand_dims(feat['cvr_label'], 1)
+            # Preserve the baseline BUY objective exactly.  The second BCE sees
+            # detached old scores inside Model.call and therefore only trains
+            # the new sidecar layers.
+            loss_buy = model.loss_bc(buy_label, pred_buy_base)
+            loss_buy_sidecar = model.loss_bc(buy_label, pred_buy)
             loss_cat = model.loss_bc(tf.expand_dims(feat['cat_label'], 1), pred_cat)
             loss_click = model.loss_bc(tf.expand_dims(feat['clk_label'], 1), pred_click)
             loss_ext = model.loss_bc(tf.expand_dims(feat['ext_label'], 1), pred_ext)
 
-            final_loss = loss_buy * buy_weight + loss_cat * cat_weight + loss_click * click_weight + loss_ext * ext_weight
+            final_loss = (loss_buy * buy_weight + loss_cat * cat_weight +
+                          loss_click * click_weight + loss_ext * ext_weight +
+                          model_conf.buy_multiscore_sidecar_loss_weight *
+                          loss_buy_sidecar)
 
             gradients = tape.gradient(final_loss, model.trainable_weights)
         model.optimizer.apply_gradients(zip(gradients, model.trainable_weights))
-        return loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext
+        return (loss_buy, loss_cat, loss_click, loss_ext, loss_buy_sidecar,
+                final_loss, pred_buy, pred_cat, pred_click, pred_ext,
+                buy_sidecar_residual)
 
     def _date_range(self, start, end):
         """返回 [start, end] 闭区间内的所有天(YYYYMMDD 字符串,升序)"""
@@ -167,7 +180,9 @@ class Learner:
             self.cnt += label_arrs[0].shape[0]
             self.pos += [a.sum() for a in label_arrs]
 
-            loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext = self.train_step(feat)
+            (loss_buy, loss_cat, loss_click, loss_ext, loss_buy_sidecar,
+             final_loss, pred_buy, pred_cat, pred_click, pred_ext,
+             buy_sidecar_residual) = self.train_step(feat)
 
             #收集 uid 采样子集的 pred/label 到内存,当天训完直接算指标
             if mfout is not None:
@@ -199,6 +214,10 @@ class Learner:
                     tf.summary.scalar('loss_cat', tf.reduce_mean(loss_cat), step=global_step)
                     tf.summary.scalar('loss_click', tf.reduce_mean(loss_click), step=global_step)
                     tf.summary.scalar('loss_ext', tf.reduce_mean(loss_ext), step=global_step)
+                    tf.summary.scalar('loss/buy_multiscore_sidecar',
+                                      tf.reduce_mean(loss_buy_sidecar), step=global_step)
+                    tf.summary.scalar('model/buy_multiscore_residual_mean',
+                                      tf.reduce_mean(buy_sidecar_residual), step=global_step)
                     tf.summary.scalar('loss/total', tf.reduce_mean(final_loss), step=global_step)
 
                     tf.summary.scalar('data/pos_rate_buy', self.pos[0] / max(self.cnt, 1), step=global_step)
