@@ -24,18 +24,63 @@ class Learner:
     def train_step(self, feat, buy_weight=1.0, cat_weight=1.0, click_weight=1.0, ext_weight=1.0):
         model = self.model
         with tf.GradientTape() as tape:
-            pred_buy, pred_cat, pred_click, pred_ext = model([feat['fea_ids'], feat['fea_vals']])
+            (pred_buy, pred_cat, pred_click, pred_ext,
+             base_pred_buy, combined_buy_logit) = model([feat['fea_ids'], feat['fea_vals']])
 
-            loss_buy = model.loss_bc(tf.expand_dims(feat['cvr_label'], 1), pred_buy)
+            # Preserve the baseline optimization path exactly.  The original
+            # BUY BCE sees base_pred_buy, not the sidecar-adjusted score.
+            buy_labels_2d = tf.expand_dims(feat['cvr_label'], 1)
+            loss_buy = model.loss_bc(buy_labels_2d, base_pred_buy)
             loss_cat = model.loss_bc(tf.expand_dims(feat['cat_label'], 1), pred_cat)
             loss_click = model.loss_bc(tf.expand_dims(feat['clk_label'], 1), pred_click)
             loss_ext = model.loss_bc(tf.expand_dims(feat['ext_label'], 1), pred_ext)
 
-            final_loss = loss_buy * buy_weight + loss_cat * cat_weight + loss_click * click_weight + loss_ext * ext_weight
+            buy_labels = tf.reshape(feat['cvr_label'], [-1])
+            pair_scores = tf.reshape(combined_buy_logit, [-1])
+            positive_scores = tf.random.shuffle(
+                tf.boolean_mask(pair_scores, buy_labels > 0.5))
+            negative_scores = tf.random.shuffle(
+                tf.boolean_mask(pair_scores, buy_labels <= 0.5))
+            pair_count = tf.minimum(
+                tf.minimum(tf.size(positive_scores), tf.size(negative_scores)),
+                tf.constant(model_conf.buy_pairwise_sidecar_max_pairs, dtype=tf.int32))
+
+            def compute_pairwise():
+                margins = positive_scores[:pair_count] - negative_scores[:pair_count]
+                return tf.reduce_mean(tf.nn.softplus(-margins)), tf.reduce_mean(margins)
+
+            pairwise_loss, pairwise_margin = tf.cond(
+                pair_count > 0,
+                compute_pairwise,
+                lambda: (tf.constant(0.0, dtype=pred_buy.dtype),
+                         tf.constant(0.0, dtype=pred_buy.dtype)))
+            eps = tf.cast(1e-6, base_pred_buy.dtype)
+            clipped_base = tf.clip_by_value(base_pred_buy, eps, 1.0 - eps)
+            detached_base_logit = tf.math.log(clipped_base) - tf.math.log1p(-clipped_base)
+            sidecar_mean_abs = tf.reduce_mean(tf.abs(
+                combined_buy_logit - tf.stop_gradient(detached_base_logit)))
+            pair_coverage = (
+                tf.cast(pair_count, pred_buy.dtype) /
+                tf.maximum(tf.cast(tf.size(buy_labels), pred_buy.dtype), 1.0))
+
+            baseline_loss = (
+                loss_buy * buy_weight + loss_cat * cat_weight +
+                loss_click * click_weight + loss_ext * ext_weight)
+            # binary_crossentropy returns one value per sample and the
+            # baseline therefore differentiates a batch sum.  Divide the
+            # scalar sidecar objective before broadcasting so its configured
+            # weight is not multiplied by batch size.
+            sidecar_loss_per_example = (
+                model_conf.buy_pairwise_sidecar_loss_weight * pairwise_loss /
+                tf.maximum(tf.cast(tf.size(buy_labels), pairwise_loss.dtype), 1.0))
+            final_loss = baseline_loss + sidecar_loss_per_example
 
             gradients = tape.gradient(final_loss, model.trainable_weights)
         model.optimizer.apply_gradients(zip(gradients, model.trainable_weights))
-        return loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext
+        return (loss_buy, loss_cat, loss_click, loss_ext, final_loss,
+                pairwise_loss, pairwise_margin, pair_count,
+                pair_coverage, sidecar_mean_abs,
+                pred_buy, pred_cat, pred_click, pred_ext)
 
     def _date_range(self, start, end):
         """返回 [start, end] 闭区间内的所有天(YYYYMMDD 字符串,升序)"""
@@ -167,7 +212,10 @@ class Learner:
             self.cnt += label_arrs[0].shape[0]
             self.pos += [a.sum() for a in label_arrs]
 
-            loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext = self.train_step(feat)
+            (loss_buy, loss_cat, loss_click, loss_ext, final_loss,
+             pairwise_loss, pairwise_margin, pair_count,
+             pair_coverage, sidecar_mean_abs,
+             pred_buy, pred_cat, pred_click, pred_ext) = self.train_step(feat)
 
             #收集 uid 采样子集的 pred/label 到内存,当天训完直接算指标
             if mfout is not None:
@@ -200,6 +248,11 @@ class Learner:
                     tf.summary.scalar('loss_click', tf.reduce_mean(loss_click), step=global_step)
                     tf.summary.scalar('loss_ext', tf.reduce_mean(loss_ext), step=global_step)
                     tf.summary.scalar('loss/total', tf.reduce_mean(final_loss), step=global_step)
+                    tf.summary.scalar('loss/buy_pairwise_sidecar', pairwise_loss, step=global_step)
+                    tf.summary.scalar('buy_pairwise/pair_count', pair_count, step=global_step)
+                    tf.summary.scalar('buy_pairwise/pair_coverage', pair_coverage, step=global_step)
+                    tf.summary.scalar('buy_pairwise/mean_margin', pairwise_margin, step=global_step)
+                    tf.summary.scalar('buy_pairwise/residual_mean_abs', sidecar_mean_abs, step=global_step)
 
                     tf.summary.scalar('data/pos_rate_buy', self.pos[0] / max(self.cnt, 1), step=global_step)
                     tf.summary.scalar('data/pos_rate_click', self.pos[2] / max(self.cnt, 1), step=global_step)

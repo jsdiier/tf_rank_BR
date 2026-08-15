@@ -166,6 +166,19 @@ class Model(tf.keras.Model):
         self.dense_concat3 = tf.keras.layers.Dense(1, activation="sigmoid",
                                                    kernel_regularizer=regularizers.l2(model_conf.l2_reg))
 
+        # Pairwise ranking is deliberately isolated from the existing model.
+        # Both the representation and the baseline BUY logit are detached in
+        # call(), so this head is the only component updated by its loss.
+        self.buy_pairwise_sidecar_hidden = tf.keras.layers.Dense(
+            model_conf.buy_pairwise_sidecar_hidden_dim,
+            activation=tf.nn.swish,
+            name='buy_pairwise_sidecar_hidden')
+        self.buy_pairwise_sidecar_output = tf.keras.layers.Dense(
+            1,
+            kernel_initializer='zeros',
+            bias_initializer='zeros',
+            name='buy_pairwise_sidecar_output')
+
     def set_summary_writer(self, writer, histogram_freq=100):
         self.summary_writer = writer
         self.histogram_freq = histogram_freq
@@ -446,6 +459,14 @@ class Model(tf.keras.Model):
 
         return weighted_sum
 
+    @staticmethod
+    def _apply_logit_residual(probability, residual):
+        """Apply a bounded logit residual while preserving p exactly at zero."""
+        odds_multiplier = tf.math.exp(residual)
+        numerator = probability * odds_multiplier
+        denominator = 1.0 - probability + numerator
+        return numerator / denominator
+
     def call(self, inputs, training=None):
         sids, fids = inputs
         step = self.optimizer.iterations
@@ -589,7 +610,23 @@ class Model(tf.keras.Model):
 
         cat_pred = cat_pred_org
 
-        ctcvr = tf.math.multiply(click_pred, cvr_pred_org)
+        base_ctcvr = tf.math.multiply(click_pred, cvr_pred_org)
+        eps = tf.cast(1e-6, base_ctcvr.dtype)
+        base_buy_logit = tf.math.log(tf.clip_by_value(base_ctcvr, eps, 1.0 - eps))
+        base_buy_logit -= tf.math.log1p(-tf.clip_by_value(base_ctcvr, eps, 1.0 - eps))
+
+        sidecar_input = tf.stop_gradient(buy_tower_output)
+        sidecar_hidden = self.buy_pairwise_sidecar_hidden(sidecar_input)
+        sidecar_raw = self.buy_pairwise_sidecar_output(sidecar_hidden)
+        sidecar_residual = (
+            tf.cast(model_conf.buy_pairwise_sidecar_residual_bound, sidecar_raw.dtype) *
+            tf.math.tanh(sidecar_raw))
+
+        # stop_gradient keeps the pairwise objective from changing the base
+        # BUY/CTR towers while preserving exactly the same inference value.
+        combined_buy_logit = tf.stop_gradient(base_buy_logit) + sidecar_residual
+        ctcvr = self._apply_logit_residual(
+            tf.stop_gradient(base_ctcvr), sidecar_residual)
 
         if self.is_save_model or self.pred:
             final_pred = ctcvr
@@ -599,5 +636,7 @@ class Model(tf.keras.Model):
             ext_score = ext_pred
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
-        return ctcvr, cat_pred, click_pred, ext_pred
+        if self.training:
+            return ctcvr, cat_pred, click_pred, ext_pred, base_ctcvr, combined_buy_logit
 
+        return ctcvr, cat_pred, click_pred, ext_pred
