@@ -62,6 +62,30 @@ eval_uid_ratio = 0.2
 # 离线推理性能测试：先预热，再统计固定数量的完整batch。
 inference_benchmark_warmup_batches = 20
 inference_benchmark_measure_batches = 100
+
+# Detached purchase-intent sidecar.  These are existing first-table slots and
+# each contributes its complete 8-dimensional FM embedding.
+purchase_intent_conversion_repeat_slots = [1, 2, 5, 6, 7, 8, 37, 38]
+purchase_intent_price_fulfillment_slots = [
+    9, 10, 13, 14, 15, 16, 19, 20, 23, 24, 27, 28, 31, 32]
+purchase_intent_history_match_gap_slots = [94, 96, 98, 100, 102, 104]
+purchase_intent_sidecar_slot_ids = (
+    purchase_intent_conversion_repeat_slots +
+    purchase_intent_price_fulfillment_slots +
+    purchase_intent_history_match_gap_slots)
+purchase_intent_sidecar_hidden_dim = 64
+purchase_intent_sidecar_residual_bound = 0.25
+purchase_intent_sidecar_loss_weight = 1.0
+
+_purchase_intent_missing_slots = sorted(
+    set(purchase_intent_sidecar_slot_ids) - set(all_slot_ids))
+if _purchase_intent_missing_slots:
+    raise ValueError(
+        "purchase-intent sidecar slots missing from all_slot_ids: %s" %
+        _purchase_intent_missing_slots)
+if fm_emb_size != 8:
+    raise ValueError(
+        "purchase-intent sidecar requires complete 8-D FM embeddings")
 #每条样本的 add_infos 字段个数
 add_info_field_num = 24
 #uid 在每条样本 add_infos 中的下标

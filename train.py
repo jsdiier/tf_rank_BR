@@ -24,18 +24,42 @@ class Learner:
     def train_step(self, feat, buy_weight=1.0, cat_weight=1.0, click_weight=1.0, ext_weight=1.0):
         model = self.model
         with tf.GradientTape() as tape:
-            pred_buy, pred_cat, pred_click, pred_ext = model([feat['fea_ids'], feat['fea_vals']])
+            (pred_buy, pred_cat, pred_click, pred_ext, pred_buy_base,
+             pred_buy_sidecar_detached, purchase_intent_residual) = model(
+                [feat['fea_ids'], feat['fea_vals']],
+                return_purchase_intent_aux=True)
 
-            loss_buy = model.loss_bc(tf.expand_dims(feat['cvr_label'], 1), pred_buy)
+            buy_label = tf.expand_dims(feat['cvr_label'], 1)
+            # Preserve the original BUY loss and its complete baseline gradient
+            # path.  The score used here does not include the sidecar.
+            loss_buy = model.loss_bc(buy_label, pred_buy_base)
             loss_cat = model.loss_bc(tf.expand_dims(feat['cat_label'], 1), pred_cat)
             loss_click = model.loss_bc(tf.expand_dims(feat['clk_label'], 1), pred_click)
             loss_ext = model.loss_bc(tf.expand_dims(feat['ext_label'], 1), pred_ext)
 
-            final_loss = loss_buy * buy_weight + loss_cat * cat_weight + loss_click * click_weight + loss_ext * ext_weight
+            # This scalar BCE sees a detached base logit and detached input
+            # embeddings, so its gradient is sidecar-only.  The baseline losses
+            # above are vectors [B].  Dividing the scalar by dynamic B before
+            # broadcasting prevents tape.gradient(vector_loss, ...) from
+            # multiplying the sidecar gradient by B.
+            loss_purchase_intent_sidecar = tf.reduce_mean(
+                model.loss_bc(buy_label, pred_buy_sidecar_detached))
+            dynamic_batch_size = tf.cast(
+                tf.shape(loss_buy)[0], loss_purchase_intent_sidecar.dtype)
+            normalized_sidecar_loss = (
+                model_conf.purchase_intent_sidecar_loss_weight *
+                loss_purchase_intent_sidecar /
+                tf.maximum(dynamic_batch_size, 1.0))
+
+            final_loss = (loss_buy * buy_weight + loss_cat * cat_weight +
+                          loss_click * click_weight + loss_ext * ext_weight +
+                          normalized_sidecar_loss)
 
             gradients = tape.gradient(final_loss, model.trainable_weights)
         model.optimizer.apply_gradients(zip(gradients, model.trainable_weights))
-        return loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext
+        return (loss_buy, loss_cat, loss_click, loss_ext,
+                loss_purchase_intent_sidecar, final_loss, pred_buy, pred_cat,
+                pred_click, pred_ext, purchase_intent_residual)
 
     def _date_range(self, start, end):
         """返回 [start, end] 闭区间内的所有天(YYYYMMDD 字符串,升序)"""
@@ -167,7 +191,9 @@ class Learner:
             self.cnt += label_arrs[0].shape[0]
             self.pos += [a.sum() for a in label_arrs]
 
-            loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext = self.train_step(feat)
+            (loss_buy, loss_cat, loss_click, loss_ext,
+             loss_purchase_intent_sidecar, final_loss, pred_buy, pred_cat,
+             pred_click, pred_ext, purchase_intent_residual) = self.train_step(feat)
 
             #收集 uid 采样子集的 pred/label 到内存,当天训完直接算指标
             if mfout is not None:
@@ -199,7 +225,13 @@ class Learner:
                     tf.summary.scalar('loss_cat', tf.reduce_mean(loss_cat), step=global_step)
                     tf.summary.scalar('loss_click', tf.reduce_mean(loss_click), step=global_step)
                     tf.summary.scalar('loss_ext', tf.reduce_mean(loss_ext), step=global_step)
+                    tf.summary.scalar('loss/buy_purchase_intent_sidecar',
+                                      loss_purchase_intent_sidecar, step=global_step)
                     tf.summary.scalar('loss/total', tf.reduce_mean(final_loss), step=global_step)
+                    tf.summary.scalar('model/purchase_intent_residual_mean',
+                                      tf.reduce_mean(purchase_intent_residual), step=global_step)
+                    tf.summary.scalar('model/purchase_intent_residual_abs_mean',
+                                      tf.reduce_mean(tf.abs(purchase_intent_residual)), step=global_step)
 
                     tf.summary.scalar('data/pos_rate_buy', self.pos[0] / max(self.cnt, 1), step=global_step)
                     tf.summary.scalar('data/pos_rate_click', self.pos[2] / max(self.cnt, 1), step=global_step)

@@ -166,6 +166,20 @@ class Model(tf.keras.Model):
         self.dense_concat3 = tf.keras.layers.Dense(1, activation="sigmoid",
                                                    kernel_regularizer=regularizers.l2(model_conf.l2_reg))
 
+        sidecar_reg = regularizers.l2(model_conf.l2_reg)
+        self.purchase_intent_sidecar_hidden = tf.keras.layers.Dense(
+            model_conf.purchase_intent_sidecar_hidden_dim,
+            activation=tf.nn.swish,
+            kernel_regularizer=sidecar_reg,
+            name='purchase_intent_sidecar_hidden')
+        self.purchase_intent_sidecar_output = tf.keras.layers.Dense(
+            1,
+            activation=None,
+            kernel_initializer='zeros',
+            bias_initializer='zeros',
+            kernel_regularizer=sidecar_reg,
+            name='purchase_intent_sidecar_output')
+
     def set_summary_writer(self, writer, histogram_freq=100):
         self.summary_writer = writer
         self.histogram_freq = histogram_freq
@@ -446,13 +460,40 @@ class Model(tf.keras.Model):
 
         return weighted_sum
 
-    def call(self, inputs, training=None):
+    @staticmethod
+    def _safe_logit(probability):
+        probability = tf.clip_by_value(probability, 1e-6, 1.0 - 1e-6)
+        return tf.math.log(probability) - tf.math.log1p(-probability)
+
+    def call(self, inputs, training=None, return_purchase_intent_aux=False):
         sids, fids = inputs
         step = self.optimizer.iterations
 
         sid_list, fid_list = self.transform(sids, fids)
 
         pooled_output, slot_mask = self.process_and_pool_fused(sid_list, fid_list)
+
+        # Reuse the complete 8-D embeddings of the selected existing slots.
+        # Detaching before flattening makes the new BUY objective incapable of
+        # updating the shared embedding table or the baseline network.
+        sidecar_slot_indices = self.slot_id_table.lookup(
+            tf.constant(model_conf.purchase_intent_sidecar_slot_ids,
+                        dtype=tf.dtypes.int32))
+        sidecar_slot_embeddings = tf.gather(
+            pooled_output[:, :, 1:], sidecar_slot_indices, axis=1)
+        sidecar_slot_embeddings = tf.stop_gradient(sidecar_slot_embeddings)
+        sidecar_input = tf.reshape(
+            sidecar_slot_embeddings,
+            [tf.shape(sidecar_slot_embeddings)[0],
+             len(model_conf.purchase_intent_sidecar_slot_ids) *
+             model_conf.fm_emb_size])
+        sidecar_hidden = self.purchase_intent_sidecar_hidden(
+            sidecar_input, training=self.training)
+        sidecar_raw_residual = self.purchase_intent_sidecar_output(
+            sidecar_hidden, training=self.training)
+        purchase_intent_residual = (
+            model_conf.purchase_intent_sidecar_residual_bound *
+            tf.math.tanh(sidecar_raw_residual))
 
         # lr part
         lr_indices = self.slot_id_table.lookup(tf.constant(model_conf.lr_slot_ids, dtype=tf.dtypes.int32))
@@ -589,15 +630,31 @@ class Model(tf.keras.Model):
 
         cat_pred = cat_pred_org
 
-        ctcvr = tf.math.multiply(click_pred, cvr_pred_org)
+        base_ctcvr = tf.math.multiply(click_pred, cvr_pred_org)
+        base_buy_logit = self._safe_logit(base_ctcvr)
+
+        # Direct sigmoid composition keeps training and serving probabilities
+        # strictly valid.  Zero initialization recovers the baseline everywhere
+        # except the deliberate numeric clipping boundary in _safe_logit.
+        combined_ctcvr = tf.math.sigmoid(
+            base_buy_logit + purchase_intent_residual)
+
+        # Numerically identical to combined_ctcvr, but all baseline terms are
+        # detached.  The auxiliary BUY BCE therefore trains only the sidecar.
+        detached_base_buy_logit = tf.stop_gradient(base_buy_logit)
+        detached_sidecar_ctcvr = tf.math.sigmoid(
+            detached_base_buy_logit + purchase_intent_residual)
 
         if self.is_save_model or self.pred:
-            final_pred = ctcvr
+            final_pred = combined_ctcvr
             cvr_score = cvr_pred_org
             ctr_score = click_pred
             cat_score = cat_pred_org
             ext_score = ext_pred
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
-        return ctcvr, cat_pred, click_pred, ext_pred
-
+        if return_purchase_intent_aux:
+            return (combined_ctcvr, cat_pred, click_pred, ext_pred,
+                    base_ctcvr, detached_sidecar_ctcvr,
+                    purchase_intent_residual)
+        return combined_ctcvr, cat_pred, click_pred, ext_pred
