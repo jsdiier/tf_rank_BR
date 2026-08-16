@@ -567,11 +567,21 @@ class Model(tf.keras.Model):
             self.query_seq_ln, self.query_seq_proj, self.query_seq_combine)
         seq_outputs.append(query_search_long_seq_out)
 
-        deep = tf.concat([emb_user, emb_shop, emb_interact] + seq_outputs, axis=-1)
+        sequence_block = tf.concat(seq_outputs, axis=-1)
+        group_blocks = {
+            'user': emb_user,
+            'shop': emb_shop,
+            'interact': emb_interact,
+            'sequence': sequence_block,
+        }
+        deep = tf.concat(
+            [group_blocks[name] for name in model_conf.rankmixer_feature_groups], axis=-1)
 
-        # 余数补dims
-        remain_dims = deep.shape[-1] % (self.rankmixer.t)
-        additional_dims = tf.zeros([tf.shape(deep)[0], self.rankmixer.t - remain_dims])
+        # 余数补 dims，使 token 边界对齐到 fm_emb_size，避免单个 slot 的 embedding 跨 token。
+        align_dim = self.rankmixer.t * model_conf.rankmixer_token_align_dim
+        remain_dims = deep.shape[-1] % align_dim
+        additional_dims = tf.zeros(
+            [tf.shape(deep)[0], (align_dim - remain_dims) % align_dim])
         deep_input = tf.concat([deep, additional_dims], axis=1)
         rankmixer_output = self.rankmixer(deep_input)
 
@@ -600,4 +610,3 @@ class Model(tf.keras.Model):
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
         return ctcvr, cat_pred, click_pred, ext_pred
-
