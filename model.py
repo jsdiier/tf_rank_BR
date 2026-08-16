@@ -590,14 +590,14 @@ class Model(tf.keras.Model):
         cat_pred = cat_pred_org
 
         ctcvr = tf.math.multiply(click_pred, cvr_pred_org)
+        final_buy = tf.math.multiply(click_pred, cat_pred_org)
 
         if self.is_save_model or self.pred:
-            final_pred = ctcvr
+            final_pred = final_buy
             cvr_score = cvr_pred_org
             ctr_score = click_pred
             cat_score = cat_pred_org
             ext_score = ext_pred
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
-        return ctcvr, cat_pred, click_pred, ext_pred
-
+        return ctcvr, final_buy, cat_pred, click_pred, ext_pred
