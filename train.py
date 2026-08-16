@@ -12,6 +12,12 @@ from tensorflow.keras import regularizers
 import time
 from sklearn import metrics
 
+
+def _safe_logit(prob):
+    prob = tf.clip_by_value(prob, 1e-7, 1.0 - 1e-7)
+    return tf.math.log(prob / (1.0 - prob))
+
+
 class Learner:
     def __init__(self):
         self.model = None
@@ -32,6 +38,12 @@ class Learner:
             loss_ext = model.loss_bc(tf.expand_dims(feat['ext_label'], 1), pred_ext)
 
             final_loss = loss_buy * buy_weight + loss_cat * cat_weight + loss_click * click_weight + loss_ext * ext_weight
+            if model_conf.funnel_order_weight > 0.0:
+                funnel_reg = (
+                    tf.math.softplus(_safe_logit(pred_buy) - _safe_logit(pred_cat))
+                    + tf.math.softplus(_safe_logit(pred_cat) - _safe_logit(pred_click))
+                )
+                final_loss = final_loss + model_conf.funnel_order_weight * funnel_reg
 
             gradients = tape.gradient(final_loss, model.trainable_weights)
         model.optimizer.apply_gradients(zip(gradients, model.trainable_weights))
