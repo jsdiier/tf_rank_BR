@@ -112,6 +112,29 @@ class Model(tf.keras.Model):
         self.attention_layer_search_long_pay = DIN_attention_Layer([50, 20], 'sigmoid', name='search_pay_seq_long')
         self.attention_layer_search_long_clk = DIN_attention_Layer([50, 20], 'sigmoid', name='search_clk_seq_long')
         self.attention_layer_search_long_query = DIN_attention_Layer([50, 20], 'sigmoid', name='search_query_seq_long')
+        self.brand_affinity_attention_layer = DIN_attention_Layer(
+            [50, 20], 'sigmoid', name='brand_affinity_seq')
+        self.shop_score_period_attention_layer = DIN_attention_Layer(
+            [50, 20], 'sigmoid', name='shop_score_period_seq')
+        self.repeat_purchase_encoder = tf.keras.Sequential([
+            tf.keras.layers.Dense(
+                32, activation=tf.nn.swish,
+                kernel_regularizer=regularizers.l2(model_conf.l2_reg),
+                name='repeat_purchase_hidden'),
+            tf.keras.layers.Dense(
+                32, activation=tf.nn.swish,
+                kernel_regularizer=regularizers.l2(model_conf.l2_reg),
+                name='repeat_purchase_output'),
+        ], name='repeat_purchase_encoder')
+        self.repeat_purchase_position_logits = self.add_weight(
+            'repeat_purchase_position_logits', shape=[3], initializer='zeros')
+        self.repeat_purchase_gate = self.add_weight(
+            'repeat_purchase_gate', shape=[],
+            initializer=tf.keras.initializers.Constant(0.01))
+        self.lhuc_gate = tf.keras.Sequential([
+            tf.keras.layers.Dense(128, activation=tf.nn.relu, name='lhuc_gate_hidden'),
+            tf.keras.layers.Dense(768, activation='sigmoid', name='lhuc_gate_out'),
+        ], name='lhuc_gate')
 
         # 搜索长序列：先融合多路 embedding，再与 DIN 注意力 + 均值池化残差组合，减轻「高维 concat 噪声」
         seq_token_dim = 32
@@ -567,6 +590,51 @@ class Model(tf.keras.Model):
             self.query_seq_ln, self.query_seq_proj, self.query_seq_combine)
         seq_outputs.append(query_search_long_seq_out)
 
+        # 候选品牌感知的48项up_s_brand统计维度注意力。
+        brand_pref_slot_ids = list(range(1421, 1469))
+        brand_pref_indices = self.slot_id_table.lookup(
+            tf.constant(brand_pref_slot_ids, dtype=tf.dtypes.int32))
+        brand_pref_seq = tf.gather(pooled_output[:, :, 1:], brand_pref_indices, axis=1)
+        brand_pref_mask = tf.gather(slot_mask, brand_pref_indices, axis=1)
+        shop_brand_query_indices = self.slot_id_table.lookup(
+            tf.constant([67], dtype=tf.dtypes.int32))
+        shop_brand_query = tf.reshape(
+            tf.gather(pooled_output[:, :, 1:], shop_brand_query_indices, axis=1),
+            [tf.shape(pooled_output)[0], model_conf.fm_emb_size])
+        brand_affinity_out = self.brand_affinity_attention_layer(
+            [shop_brand_query, brand_pref_seq, brand_pref_seq, brand_pref_mask])
+        seq_outputs.append(brand_affinity_out)
+
+        # 最近三单的候选店铺命中状态与离散复购间隔联合编码（recency v2 升级）。
+        matched_indices = self.slot_id_table.lookup(
+            tf.constant([94, 98, 102], dtype=tf.dtypes.int32))
+        gap_indices = self.slot_id_table.lookup(
+            tf.constant([96, 100, 104], dtype=tf.dtypes.int32))
+        matched_emb = tf.gather(pooled_output[:, :, 1:], matched_indices, axis=1)
+        gap_emb = tf.gather(pooled_output[:, :, 1:], gap_indices, axis=1)
+        repeat_purchase_inputs = tf.concat([matched_emb, gap_emb], axis=-1)
+        repeat_purchase_states = self.repeat_purchase_encoder(repeat_purchase_inputs)
+        position_weights = tf.nn.softmax(self.repeat_purchase_position_logits)
+        repeat_purchase_out = tf.reduce_sum(
+            repeat_purchase_states * position_weights[None, :, None], axis=1)
+        seq_outputs.append(self.repeat_purchase_gate * repeat_purchase_out)
+
+        # 当前请求时段感知的7项分时段店铺偏好统计注意力。
+        shop_score_period_slot_ids = [1160, 1161, 1162, 1163, 1164, 1165, 1166]
+        shop_score_period_indices = self.slot_id_table.lookup(
+            tf.constant(shop_score_period_slot_ids, dtype=tf.dtypes.int32))
+        shop_score_period_seq = tf.gather(
+            pooled_output[:, :, 1:], shop_score_period_indices, axis=1)
+        shop_score_period_mask = tf.gather(slot_mask, shop_score_period_indices, axis=1)
+        period_query_indices = self.slot_id_table.lookup(
+            tf.constant([40], dtype=tf.dtypes.int32))
+        period_query = tf.reshape(
+            tf.gather(pooled_output[:, :, 1:], period_query_indices, axis=1),
+            [tf.shape(pooled_output)[0], model_conf.fm_emb_size])
+        shop_score_period_out = self.shop_score_period_attention_layer(
+            [period_query, shop_score_period_seq, shop_score_period_seq, shop_score_period_mask])
+        seq_outputs.append(shop_score_period_out)
+
         deep = tf.concat([emb_user, emb_shop, emb_interact] + seq_outputs, axis=-1)
 
         # 余数补dims
@@ -575,12 +643,18 @@ class Model(tf.keras.Model):
         deep_input = tf.concat([deep, additional_dims], axis=1)
         rankmixer_output = self.rankmixer(deep_input)
 
+        # 用户侧LHUC个性化门控。
+        rankmixer_output = rankmixer_output * (2.0 * self.lhuc_gate(emb_user))
+
         concat = tf.concat([lr, fm, rankmixer_output], axis=1)
 
-        buy_tower_output = self.buy_tower(concat, training=self.training)
         cat_tower_output = self.cat_tower(concat, training=self.training)
         click_tower_output = self.click_tower(concat, training=self.training)
         ext_tower_output = self.ext_tower(concat, training=self.training)
+        buy_tower_input = tf.concat(
+            [concat, tf.stop_gradient(cat_tower_output), tf.stop_gradient(click_tower_output)],
+            axis=1)
+        buy_tower_output = self.buy_tower(buy_tower_input, training=self.training)
 
         cvr_pred_org = self.dense_concat(buy_tower_output)
         cat_pred_org = self.dense_concat1(cat_tower_output)
@@ -590,14 +664,15 @@ class Model(tf.keras.Model):
         cat_pred = cat_pred_org
 
         ctcvr = tf.math.multiply(click_pred, cvr_pred_org)
+        final_buy = tf.math.multiply(
+            tf.math.pow(click_pred, model_conf.buy_ctr_alpha), cvr_pred_org)
 
         if self.is_save_model or self.pred:
-            final_pred = ctcvr
+            final_pred = final_buy
             cvr_score = cvr_pred_org
             ctr_score = click_pred
             cat_score = cat_pred_org
             ext_score = ext_pred
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
-        return ctcvr, cat_pred, click_pred, ext_pred
-
+        return ctcvr, final_buy, cat_pred, click_pred, ext_pred
