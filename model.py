@@ -128,6 +128,22 @@ class Model(tf.keras.Model):
         self.query_seq_combine = tf.keras.layers.Dense(seq_token_dim, activation=tf.nn.swish,
                                                        kernel_regularizer=seq_reg)
         self.search_seq_dropout = tf.keras.layers.Dropout(0.1)
+        # 搜索长序列语义残差：与候选感知池化并行，保留原始序列的类别/类目均值摘要。
+        self.search_pay_semantic_proj = tf.keras.layers.Dense(
+            seq_token_dim, activation=tf.nn.swish, kernel_regularizer=seq_reg,
+            name='search_pay_semantic_proj')
+        self.search_pay_semantic_gate = self.add_weight(
+            'search_pay_semantic_gate', shape=[], initializer='zeros')
+        self.search_clk_semantic_proj = tf.keras.layers.Dense(
+            seq_token_dim, activation=tf.nn.swish, kernel_regularizer=seq_reg,
+            name='search_clk_semantic_proj')
+        self.search_clk_semantic_gate = self.add_weight(
+            'search_clk_semantic_gate', shape=[], initializer='zeros')
+        self.search_query_semantic_proj = tf.keras.layers.Dense(
+            seq_token_dim, activation=tf.nn.swish, kernel_regularizer=seq_reg,
+            name='search_query_semantic_proj')
+        self.search_query_semantic_gate = self.add_weight(
+            'search_query_semantic_gate', shape=[], initializer='zeros')
 
         # 初始化4个任务塔
         self.buy_tower = tf.keras.Sequential()
@@ -347,6 +363,13 @@ class Model(tf.keras.Model):
         att = attention_layer([seq_query, x, x, mask])
         return combine_layer(tf.concat([att, pool], axis=-1))
 
+    def _search_seq_semantic_residual(self, seq_raw, mask, proj_layer, gate):
+        """搜索长序列的语义均值残差：近零门控，保留原候选感知池化输出。"""
+        len_sum = tf.reduce_sum(mask, axis=1, keepdims=True)
+        pool = tf.reduce_sum(seq_raw * tf.expand_dims(mask, -1), axis=1) / (len_sum + 1e-8)
+        semantic = proj_layer(pool)
+        return 0.1 * tf.nn.tanh(gate) * semantic
+
     def ads_seq_cross_layer(self, name, nn_inputs, ads_emb, ads_hidden_dim=64, ads_output_dim=1):
         # ads_input_dim = nn_inputs.get_shape().as_list()[-1]
         ads_input_dim = tf.shape(nn_inputs)[-1]
@@ -539,6 +562,9 @@ class Model(tf.keras.Model):
             pay_search_long_seq, search_pay_seq_mask, emb_shop,
             self.attention_layer_search_long_pay,
             self.pay_seq_ln, self.pay_seq_proj, self.pay_seq_combine)
+        pay_search_long_seq_out = pay_search_long_seq_out + self._search_seq_semantic_residual(
+            pay_search_long_seq, search_pay_seq_mask,
+            self.search_pay_semantic_proj, self.search_pay_semantic_gate)
         seq_outputs.append(pay_search_long_seq_out)
 
         # 搜索点击序列
@@ -554,6 +580,9 @@ class Model(tf.keras.Model):
             click_search_long_seq, click_seq_mask, emb_shop,
             self.attention_layer_search_long_clk,
             self.clk_seq_ln, self.clk_seq_proj, self.clk_seq_combine)
+        clk_search_long_seq_out = clk_search_long_seq_out + self._search_seq_semantic_residual(
+            click_search_long_seq, click_seq_mask,
+            self.search_clk_semantic_proj, self.search_clk_semantic_gate)
         seq_outputs.append(clk_search_long_seq_out)
 
         # 搜索query序列
@@ -565,6 +594,9 @@ class Model(tf.keras.Model):
             query_seq_input, query_cate_mask, emb_shop,
             self.attention_layer_search_long_query,
             self.query_seq_ln, self.query_seq_proj, self.query_seq_combine)
+        query_search_long_seq_out = query_search_long_seq_out + self._search_seq_semantic_residual(
+            query_seq_input, query_cate_mask,
+            self.search_query_semantic_proj, self.search_query_semantic_gate)
         seq_outputs.append(query_search_long_seq_out)
 
         deep = tf.concat([emb_user, emb_shop, emb_interact] + seq_outputs, axis=-1)
@@ -600,4 +632,3 @@ class Model(tf.keras.Model):
             return final_pred, cvr_score, ctr_score, cat_score, ext_score
 
         return ctcvr, cat_pred, click_pred, ext_pred
-
