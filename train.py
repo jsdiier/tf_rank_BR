@@ -27,6 +27,10 @@ class Learner:
             pred_buy, pred_cat, pred_click, pred_ext = model([feat['fea_ids'], feat['fea_vals']])
 
             loss_buy = model.loss_bc(tf.expand_dims(feat['cvr_label'], 1), pred_buy)
+            if model_conf.buy_loss_only_on_cat:
+                cat_mask = tf.cast(
+                    tf.greater(tf.expand_dims(feat['cat_label'], 1), 0.5), loss_buy.dtype)
+                loss_buy = loss_buy * cat_mask
             loss_cat = model.loss_bc(tf.expand_dims(feat['cat_label'], 1), pred_cat)
             loss_click = model.loss_bc(tf.expand_dims(feat['clk_label'], 1), pred_click)
             loss_ext = model.loss_bc(tf.expand_dims(feat['ext_label'], 1), pred_ext)
