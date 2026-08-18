@@ -1,0 +1,3 @@
+branch	checkpoints	fixed_log_parseable	inference_benchmark_complete	last_test_day_correct	rolling_logs_complete	rolling_summary_complete
+BR_train_buy_click_conditional_loss_cat	yes	yes	yes	yes	yes	yes
+BR_train_buy_gradient_conflict_diagnosis	yes	yes	yes	yes	yes	yes

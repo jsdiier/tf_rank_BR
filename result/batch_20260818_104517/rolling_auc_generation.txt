@@ -1,0 +1,4 @@
+[INFO] tf_train_base_new_try_roll_test_predict_time: 36 rolling metric rows <- /home/luban/rank-ssl/chenpinyuan/tf_rank_BR/tf_train_base_new_try_roll_test_predict_time/model/rolling_metrics.tsv
+[INFO] BR_train_buy_click_conditional_loss_cat: 36 rolling metric rows <- /home/luban/rank-ssl/chenpinyuan/tf_rank_BR/BR_train_buy_click_conditional_loss_cat/model/rolling_metrics.tsv
+[INFO] BR_train_buy_gradient_conflict_diagnosis: 36 rolling metric rows <- /home/luban/rank-ssl/chenpinyuan/tf_rank_BR/BR_train_buy_gradient_conflict_diagnosis/model/rolling_metrics.tsv
+[INFO] wrote self-contained HTML: /home/luban/rank-ssl/chenpinyuan/tf_rank_BR/shared_tools/result/batch_20260818_104517/rolling_auc.html
