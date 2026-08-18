@@ -23,7 +23,7 @@ class Learner:
     @tf.function(experimental_relax_shapes=True)
     def train_step(self, feat, buy_weight=1.0, cat_weight=1.0, click_weight=1.0, ext_weight=1.0):
         model = self.model
-        with tf.GradientTape() as tape:
+        with tf.GradientTape(persistent=True) as tape:
             pred_buy, pred_cat, pred_click, pred_ext = model([feat['fea_ids'], feat['fea_vals']])
 
             loss_buy = model.loss_bc(tf.expand_dims(feat['cvr_label'], 1), pred_buy)
@@ -31,11 +31,55 @@ class Learner:
             loss_click = model.loss_bc(tf.expand_dims(feat['clk_label'], 1), pred_click)
             loss_ext = model.loss_bc(tf.expand_dims(feat['ext_label'], 1), pred_ext)
 
-            final_loss = loss_buy * buy_weight + loss_cat * cat_weight + loss_click * click_weight + loss_ext * ext_weight
+            loss_aux = loss_cat * cat_weight + loss_click * click_weight + loss_ext * ext_weight
+            final_loss = loss_buy * buy_weight + loss_aux
+            weights = model.trainable_weights
 
-            gradients = tape.gradient(final_loss, model.trainable_weights)
-        model.optimizer.apply_gradients(zip(gradients, model.trainable_weights))
-        return loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext
+            gradients = tape.gradient(final_loss, weights)
+            if model_conf.log_gradient_conflict:
+                grads_buy = tape.gradient(loss_buy * buy_weight, weights)
+                grads_aux = tape.gradient(loss_aux, weights)
+        del tape
+
+        model.optimizer.apply_gradients(zip(gradients, weights))
+
+        if model_conf.log_gradient_conflict:
+            mean_cos, conflict_ratio, mean_proj_norm = self._gradient_conflict_stats(
+                grads_buy, grads_aux, weights)
+        else:
+            mean_cos = tf.constant(0.0)
+            conflict_ratio = tf.constant(0.0)
+            mean_proj_norm = tf.constant(0.0)
+
+        return (loss_buy, loss_cat, loss_click, loss_ext, final_loss,
+                pred_buy, pred_cat, pred_click, pred_ext,
+                mean_cos, conflict_ratio, mean_proj_norm)
+
+    def _gradient_conflict_stats(self, grads_buy, grads_aux, weights):
+        coses = []
+        conflicts = []
+        proj_norms = []
+        for gb, ga, w in zip(grads_buy, grads_aux, weights):
+            if gb is None or ga is None:
+                continue
+            name = w.name.lower()
+            if any(k in name for k in ('buy_tower', 'cat_tower', 'click_tower', 'ext_tower', 'emb_')):
+                continue
+            gb = tf.reshape(gb, [-1])
+            ga = tf.reshape(ga, [-1])
+            dot = tf.reduce_sum(gb * ga)
+            norm_b = tf.norm(gb)
+            norm_a = tf.norm(ga)
+            cos = dot / (norm_b * norm_a + 1e-8)
+            coses.append(cos)
+            conflicts.append(tf.cast(cos < 0.0, tf.float32))
+            proj = ga - (dot / (norm_b * norm_b + 1e-8)) * gb
+            proj_norms.append(tf.norm(proj))
+
+        mean_cos = tf.reduce_mean(tf.stack(coses)) if coses else tf.constant(0.0)
+        conflict_ratio = tf.reduce_mean(tf.stack(conflicts)) if conflicts else tf.constant(0.0)
+        mean_proj_norm = tf.reduce_mean(tf.stack(proj_norms)) if proj_norms else tf.constant(0.0)
+        return mean_cos, conflict_ratio, mean_proj_norm
 
     def _date_range(self, start, end):
         """返回 [start, end] 闭区间内的所有天(YYYYMMDD 字符串,升序)"""
@@ -167,7 +211,7 @@ class Learner:
             self.cnt += label_arrs[0].shape[0]
             self.pos += [a.sum() for a in label_arrs]
 
-            loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext = self.train_step(feat)
+            loss_buy, loss_cat, loss_click, loss_ext, final_loss, pred_buy, pred_cat, pred_click, pred_ext, mean_cos, conflict_ratio, mean_proj_norm = self.train_step(feat)
 
             #收集 uid 采样子集的 pred/label 到内存,当天训完直接算指标
             if mfout is not None:
@@ -200,14 +244,18 @@ class Learner:
                     tf.summary.scalar('loss_click', tf.reduce_mean(loss_click), step=global_step)
                     tf.summary.scalar('loss_ext', tf.reduce_mean(loss_ext), step=global_step)
                     tf.summary.scalar('loss/total', tf.reduce_mean(final_loss), step=global_step)
+                    tf.summary.scalar('grad_conflict/mean_cos', mean_cos, step=global_step)
+                    tf.summary.scalar('grad_conflict/conflict_ratio', conflict_ratio, step=global_step)
+                    tf.summary.scalar('grad_conflict/mean_proj_norm', mean_proj_norm, step=global_step)
 
                     tf.summary.scalar('data/pos_rate_buy', self.pos[0] / max(self.cnt, 1), step=global_step)
                     tf.summary.scalar('data/pos_rate_click', self.pos[2] / max(self.cnt, 1), step=global_step)
 
                 print(datetime.datetime.now(),
-                        "day %s steps: %d, buy loss: %04f, pos: %d, cnt: %d,  cat loss: %04f, cat pos: %d,  click loss: %04f, click pos: %d,  ext loss: %04f, ext pos: %d, sampled: %d" % (
+                        "day %s steps: %d, buy loss: %04f, pos: %d, cnt: %d,  cat loss: %04f, cat pos: %d,  click loss: %04f, click pos: %d,  ext loss: %04f, ext pos: %d, sampled: %d,  mean_cos: %04f, conflict_ratio: %04f, mean_proj_norm: %04f" % (
                         day, self.gstep, tf.reduce_mean(loss_buy), self.pos[0], self.cnt, tf.reduce_mean(loss_cat), self.pos[1],
-                        tf.reduce_mean(loss_click), self.pos[2], tf.reduce_mean(loss_ext), self.pos[3], n_sampled))
+                        tf.reduce_mean(loss_click), self.pos[2], tf.reduce_mean(loss_ext), self.pos[3], n_sampled,
+                        mean_cos, conflict_ratio, mean_proj_norm))
 
         if step < 0:
             print(datetime.datetime.now(), "day %s finish, no batches" % day)
